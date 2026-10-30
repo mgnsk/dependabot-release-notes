@@ -12,12 +12,14 @@ inputs:
     description: Login that the token posts as, whose comments the action may edit and delete
     default: github-actions[bot]
 
+  any-author:
+    description: Run on a pull request that Dependabot did not open
+    default: "false"
+
 runs:
-  using: composite
-  steps:
-    - shell: bash
-      run: node "$GITHUB_ACTION_PATH/dependabot-release-notes.mjs"
-      env:
-        GITHUB_TOKEN: ${{ inputs.token }}
-        PR_NUMBER: ${{ inputs.pull-request }}
-        COMMENT_AUTHOR: ${{ inputs.author }}
+  using: node24
+  main: dependabot-release-notes.mjs
+
+branding:
+  icon: file-text
+  color: blue

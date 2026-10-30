@@ -15,7 +15,7 @@ import {
   releasesRoute,
   runAction,
   upstreamCommit,
-} from './harness.mjs'
+} from '../test-support/harness.mjs'
 
 const ZERO_WIDTH_SPACE = '​'
 const API = `https://api.github.com/repos/${REPOSITORY}`
@@ -143,7 +143,7 @@ describe('finding updates in commit messages', () => {
   })
 
   for (const [form, message] of [
-    ['a linked Bumps', 'Bumps [foo](https://github.com/foo/foo) from 1.0.0 to 1.2.0.'],
+    ['a linked Bumps', 'Bumps [foo](https://example.test/foo) from 1.0.0 to 1.2.0.'],
     ['a plain Bumps', 'Bumps foo from 1.0.0 to 1.2.0.'],
     ['a linked Bumps with a directory', 'Bumps [foo](https://example.test) from 1.0.0 to 1.2.0 in /sub.'],
     ['a plain Bumps with a directory', 'Bumps foo from 1.0.0 to 1.2.0 in /sub'],
@@ -299,6 +299,7 @@ describe('Go module proxy', () => {
   })
 
   test('compares the hashes of a pseudo-version', async () => {
+    const [AAA, BBB] = ['a'.repeat(40), 'b'.repeat(40)]
     const from = '0.0.0-20260101000000-aaaaaaaaaaaa'
     const to = '0.0.0-20260201000000-bbbbbbbbbbbb'
     const comment = await postedComment({
@@ -306,13 +307,13 @@ describe('Go module proxy', () => {
       routes: {
         ...proxyRoute('example.test/pseudo', `v${from}`, {
           URL: 'https://github.com/foo/bar',
-          Hash: 'aaa',
+          Hash: AAA,
         }),
         ...proxyRoute('example.test/pseudo', `v${to}`, {
           URL: 'https://github.com/foo/bar',
-          Hash: 'bbb',
+          Hash: BBB,
         }),
-        ...compareRoute('foo/bar', 'aaa', 'bbb', [upstreamCommit('A change')]),
+        ...compareRoute('foo/bar', AAA, BBB, [upstreamCommit('A change')]),
       },
     })
 
@@ -361,7 +362,7 @@ describe('Go module proxy', () => {
 
   test('warns and carries on when the proxy fails', async () => {
     const failing = { status: 500, body: { message: 'proxy down' } }
-    const run = await succeed({
+    const run = await runAction({
       files: [goModFile([['example.test/flaky', 'v1.0.0', 'v1.1.0']])],
       routes: {
         'GET https://proxy.golang.org/example.test/flaky/@v/v1.0.0.info': failing,
@@ -369,6 +370,7 @@ describe('Go module proxy', () => {
       },
     })
 
+    assert.equal(run.code, 1)
     assert.match(run.stderr, /example\.test\/flaky@v1\.0\.0/)
     assert.match(run.posted[0], /No release notes available/)
   })
@@ -665,7 +667,7 @@ describe('rendering', () => {
     assert.ok(!comment.includes('truncated'))
   })
 
-  test('truncates a dependency that fills its section', async () => {
+  test('keeps the newest releases of a dependency that fills its section', async () => {
     const releases = ['1', '2', '3', '4', '5'].map((minor) =>
       release(`v1.${minor}.0`, `notes of ${minor} ${'x'.repeat(3_900)}`),
     )
@@ -674,10 +676,19 @@ describe('rendering', () => {
       routes: releasesRoute('foo/bar', releases),
     })
 
-    assert.match(comment, /notes of 1 /)
-    assert.doesNotMatch(comment, /notes of 5 /)
-    assert.equal(count(comment, '_… truncated._'), 1)
+    assert.match(comment, /… and 2 earlier releases\./)
+    assert.doesNotMatch(comment, /notes of 2 /)
+    assertInOrder(comment, 'notes of 3 ', 'notes of 4 ', 'notes of 5 ')
     assert.ok(comment.length < 16_000, `${comment.length} chars`)
+  })
+
+  test('says nothing of earlier releases when all of them fit', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: releasesRoute('foo/bar', [release('v1.2.0', 'notes')]),
+    })
+
+    assert.doesNotMatch(comment, /earlier/)
   })
 
   test('caps a commit list and counts the rest', async () => {
@@ -691,9 +702,10 @@ describe('rendering', () => {
     })
 
     assert.match(comment, /No release published\. Commits in this range/)
-    assert.match(comment, /Commit 19]/)
-    assert.doesNotMatch(comment, /Commit 20]/)
-    assert.match(comment, /… and 3 more\./)
+    assert.match(comment, /Commit 22]/)
+    assert.match(comment, /Commit 3]/)
+    assert.doesNotMatch(comment, /Commit 2]/)
+    assert.match(comment, /… and 3 earlier\./)
     assert.doesNotMatch(comment, /The rest of the message/)
   })
 
@@ -752,7 +764,7 @@ describe('rendering', () => {
 
     const [comment] = run.posted
     assert.equal(count(comment, '<details>'), 1)
-    assert.match(comment, /<code>github\.com\/aws\/sdk\/service<\/code> — 2 modules/)
+    assert.match(comment, /<code>github\.com\/aws\/sdk\/service<\/code> — 2 packages/)
     assert.match(comment, /- `github\.com\/aws\/sdk\/service\/s3` 1\.0\.0 → 1\.1\.0/)
     assert.match(comment, /- `github\.com\/aws\/sdk\/service\/sqs` 1\.0\.0 → 1\.1\.0/)
 
@@ -883,496 +895,797 @@ describe('posting', () => {
   })
 })
 
-describe('findings of the code review', () => {
-  const missing = (name, ...versions) =>
-    Object.fromEntries(
-      versions.map((version) => [`GET https://proxy.golang.org/${name}/@v/${version}.info`, notFound]),
-    )
-  const failing = (status, headers) => ({ status, headers, body: { message: 'no' } })
-  const barRoutes = (body) => releasesRoute('foo/bar', [release('v1.2.0', body)])
-  const withBody = (body) => ({ messages: [barUpdate()], routes: barRoutes(body) })
-  const goChange = goModFile([['example.test/go', 'v1.0.0', 'v1.1.0']])
-  const goMissing = missing('example.test/go', 'v1.0.0', 'v1.1.0')
+const missing = (name, ...versions) =>
+  Object.fromEntries(
+    versions.map((version) => [`GET https://proxy.golang.org/${name}/@v/${version}.info`, notFound]),
+  )
+const failing = (status, headers) => ({ status, headers, body: { message: 'no' } })
+const barRoutes = (body) => releasesRoute('foo/bar', [release('v1.2.0', body)])
+const withBody = (body) => ({ messages: [barUpdate()], routes: barRoutes(body) })
+const goChange = goModFile([['example.test/go', 'v1.0.0', 'v1.1.0']])
+const goMissing = missing('example.test/go', 'v1.0.0', 'v1.1.0')
 
-  describe('updates outside go.mod', () => {
-    const npm = updatesBlock('left-pad', '1.0.0', '1.1.0', 'https://github.com/foo/pad/compare/v1.0.0...v1.1.0')
-    const padRoutes = releasesRoute('foo/pad', [release('v1.1.0', 'pad notes')])
+describe('updates outside go.mod', () => {
+  const npm = updatesBlock('left-pad', '1.0.0', '1.1.0', 'https://github.com/foo/pad/compare/v1.0.0...v1.1.0')
+  const padRoutes = releasesRoute('foo/pad', [release('v1.1.0', 'pad notes')])
 
-    test('keeps another ecosystem in a mixed update, without asking the proxy', async () => {
-      const run = await succeed({
-        messages: [npm],
-        files: [goChange, { filename: 'package.json', patch: '-a\n+b' }],
-        routes: { ...goMissing, ...padRoutes },
-      })
-
-      assert.match(run.posted[0], /example\.test\/go/)
-      assert.match(run.posted[0], /pad notes/)
-      assert.ok(!run.requests.some((request) => request.url.includes('proxy.golang.org/left-pad')))
+  test('keeps another ecosystem in a mixed update, without asking the proxy', async () => {
+    const run = await succeed({
+      messages: [npm],
+      files: [goChange, { filename: 'package.json', patch: '-a\n+b' }],
+      routes: { ...goMissing, ...padRoutes },
     })
 
-    test('keeps an update announced for a go.mod without a patch', async () => {
-      const comment = await postedComment({
-        messages: [npm],
-        files: [goChange, { filename: 'sub/go.mod' }],
-        routes: { ...goMissing, ...padRoutes },
-      })
-
-      assert.match(comment, /pad notes/)
-    })
-
-    test('does not report a module twice when the message has another range', async () => {
-      const comment = await postedComment({
-        messages: [updatesBlock('example.test/go', '1.0.0', '1.0.5', 'https://github.com/foo/go/compare/v1.0.0...v1.0.5')],
-        files: [goChange, { filename: 'package.json', patch: '-a\n+b' }],
-        routes: goMissing,
-      })
-
-      assert.equal(count(comment, '<details>'), 1)
-      assert.match(comment, /1\.0\.0 → 1\.1\.0/)
-    })
+    assert.match(run.posted[0], /example\.test\/go/)
+    assert.match(run.posted[0], /pad notes/)
+    assert.ok(!run.requests.some((request) => request.url.includes('proxy.golang.org/left-pad')))
   })
 
-  describe('a dependency that fails', () => {
-    const two = `${barUpdate()}\n\n${updatesBlock('github.com/foo/ok', '1.0.0', '1.1.0', 'https://github.com/foo/ok/compare/v1.0.0...v1.1.0')}`
-    const okRoutes = releasesRoute('foo/ok', [release('v1.1.0', 'ok notes')])
+  test('keeps an update announced for a go.mod without a patch', async () => {
+    const comment = await postedComment({
+      messages: [npm],
+      files: [goChange, { filename: 'sub/go.mod' }],
+      routes: { ...goMissing, ...padRoutes },
+    })
 
-    test('costs the others nothing and the run still succeeds', async () => {
-      const run = await succeed({
-        messages: [two],
+    assert.match(comment, /pad notes/)
+  })
+
+  test('does not report a module twice when the message has another range', async () => {
+    const comment = await postedComment({
+      messages: [updatesBlock('example.test/go', '1.0.0', '1.0.5', 'https://github.com/foo/go/compare/v1.0.0...v1.0.5')],
+      files: [goChange, { filename: 'package.json', patch: '-a\n+b' }],
+      routes: goMissing,
+    })
+
+    assert.equal(count(comment, '<details>'), 1)
+    assert.match(comment, /1\.0\.0 → 1\.1\.0/)
+  })
+})
+
+describe('a dependency that fails', () => {
+  const two = `${barUpdate()}\n\n${updatesBlock('github.com/foo/ok', '1.0.0', '1.1.0', 'https://github.com/foo/ok/compare/v1.0.0...v1.1.0')}`
+  const okUpdate = updatesBlock('github.com/foo/ok', '1.0.0', '1.1.0', 'https://github.com/foo/ok/compare/v1.0.0...v1.1.0')
+  const okFirst = `${okUpdate}\n\n${barUpdate()}`
+  const okRoutes = releasesRoute('foo/ok', [release('v1.1.0', 'ok notes')])
+
+  test('costs the others nothing and the run still succeeds', async () => {
+    const run = await succeed({
+      messages: [two],
+      routes: {
+        'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(403),
+        'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': failing(403),
+        ...okRoutes,
+      },
+    })
+
+    assert.match(run.posted[0], /ok notes/)
+    assert.match(run.posted[0], /No release notes available/)
+    assert.match(run.stderr, /github\.com\/foo\/bar: GET .*403/)
+  })
+
+  test('still lists the commits when its releases are refused', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(403),
+        ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [upstreamCommit('A commit')]),
+      },
+    })
+
+    assert.match(comment, /A commit/)
+  })
+
+  test('asks a failed project once', async () => {
+    const run = await succeed({
+      messages: [`${barUpdate()}\n\n${barUpdate('1.1.0', '1.2.0')}`],
+      routes: {
+        'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(403),
+        ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', []),
+        ...compareRoute('foo/bar', 'v1.1.0', 'v1.2.0', []),
+      },
+    })
+
+    assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 1)
+  })
+
+  for (const [name, route] of [
+    ['a 429', failing(429)],
+    ['a 403 with no requests left', failing(403, { 'x-ratelimit-remaining': '0' })],
+    ['a 403 asking to retry', failing(403, { 'retry-after': '60' })],
+  ]) {
+    test(`posts what it has and exits 1 on ${name}`, async () => {
+      const run = await runAction({
+        messages: [okFirst],
         routes: {
-          'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(500),
-          'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': failing(500),
+          'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': route,
+          'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': route,
           ...okRoutes,
         },
       })
 
-      assert.match(run.posted[0], /ok notes/)
-      assert.match(run.posted[0], /No release notes available/)
-      assert.match(run.stderr, /github\.com\/foo\/bar: GET .*500/)
-    })
-
-    test('still lists the commits when its releases are refused', async () => {
-      const comment = await postedComment({
-        messages: [barUpdate()],
-        routes: {
-          'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(403),
-          ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [upstreamCommit('A commit')]),
-        },
-      })
-
-      assert.match(comment, /A commit/)
-    })
-
-    test('asks a failed project once', async () => {
-      const run = await succeed({
-        messages: [`${barUpdate()}\n\n${barUpdate('1.1.0', '1.2.0')}`],
-        routes: {
-          'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(500),
-          ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', []),
-          ...compareRoute('foo/bar', 'v1.1.0', 'v1.2.0', []),
-        },
-      })
-
-      assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 1)
-    })
-
-    for (const [name, route] of [
-      ['a 429', failing(429)],
-      ['a 403 with no requests left', failing(403, { 'x-ratelimit-remaining': '0' })],
-      ['a 403 asking to retry', failing(403, { 'retry-after': '60' })],
-    ]) {
-      test(`posts what it has and exits 1 on ${name}`, async () => {
-        const run = await runAction({
-          messages: [two],
-          routes: {
-            'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': route,
-            'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': route,
-            ...okRoutes,
-          },
-        })
-
-        assert.equal(run.code, 1)
-        assert.match(run.stderr, /Rate limited/)
-        assert.match(run.posted[0], /ok notes/)
-      })
-    }
-
-    test('exits 1 on a dry run that was rate limited', async () => {
-      const run = await runAction({
-        messages: [barUpdate()],
-        args: ['--dry-run'],
-        routes: {
-          'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(429),
-          'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': failing(429),
-        },
-      })
-
       assert.equal(run.code, 1)
+      assert.match(run.stderr, /Rate limited/)
+      assert.match(run.posted[0], /ok notes/)
     })
+  }
+
+  test('exits 1 on a dry run that was rate limited', async () => {
+    const run = await runAction({
+      messages: [barUpdate()],
+      args: ['--dry-run'],
+      routes: {
+        'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': failing(429),
+        'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': failing(429),
+      },
+    })
+
+    assert.equal(run.code, 1)
+  })
+})
+
+describe('markup in release bodies', () => {
+  test('closes a code fence the truncation cut', async () => {
+    const comment = await postedComment(withBody(`\`\`\`go\n${'x'.repeat(5_000)}`))
+
+    assert.match(comment, /x\n```\n\n_… truncated\._/)
   })
 
-  describe('markup in release bodies', () => {
-    test('closes a code fence the truncation cut', async () => {
-      const comment = await postedComment(withBody(`\`\`\`go\n${'x'.repeat(5_000)}`))
+  test('closes a tilde fence with its own length', async () => {
+    const comment = await postedComment(withBody(`~~~~\n~~~\n${'x'.repeat(5_000)}`))
 
-      assert.match(comment, /x\n```\n\n_… truncated\._/)
-    })
-
-    test('closes a tilde fence with its own length', async () => {
-      const comment = await postedComment(withBody(`~~~~\n~~~\n${'x'.repeat(5_000)}`))
-
-      assert.match(comment, /x\n~~~~\n\n_… truncated\._/)
-    })
-
-    test('does not close a fence the body closed itself', async () => {
-      const comment = await postedComment(withBody(`\`\`\`\ncode\n\`\`\`\n${'x'.repeat(5_000)}`))
-
-      assert.match(comment, /x\n\n_… truncated\._/)
-    })
-
-    test('closes an HTML comment the truncation cut', async () => {
-      const comment = await postedComment(withBody(`<!-- ${'x'.repeat(5_000)}`))
-
-      assert.match(comment, /x -->\n\n_… truncated\._/)
-    })
-
-    test('does not mistake a comment opener in code for a comment', async () => {
-      const comment = await postedComment(withBody(`\`\`\`\n<!--\n\`\`\`\n${'x'.repeat(5_000)}`))
-
-      assert.match(comment, /x\n\n_… truncated\._/)
-    })
-
-    test('closes what a short body left open', async () => {
-      const fence = await postedComment(withBody('```\nnever closed'))
-      const html = await postedComment(withBody('<!-- never closed'))
-
-      assert.match(fence, /never closed\n```\n/)
-      assert.match(html, /never closed -->\n/)
-    })
-
-    test('closes what the limit of a whole section cut', async () => {
-      const releases = ['1', '2', '3', '4', '5'].map((minor) =>
-        release(`v1.${minor}.0`, `\`\`\`\n${'x'.repeat(3_950)}\n\`\`\``),
-      )
-      const comment = await postedComment({
-        messages: [barUpdate('1.0.0', '1.5.0')],
-        routes: releasesRoute('foo/bar', releases),
-      })
-
-      assert.match(comment, /x\n```\n\n_… truncated\._\n/)
-    })
-
-    test('strips disclosure tags, but not from code', async () => {
-      const comment = await postedComment(
-        withBody('<details open><summary>More</summary>inner</details>\n\n`<details>`'),
-      )
-
-      assert.equal(count(comment, '<details>'), 2)
-      assert.equal(count(comment, '</details>'), 1)
-      assert.ok(comment.includes('Moreinner'))
-    })
+    assert.match(comment, /x\n~~~~\n\n_… truncated\._/)
   })
 
-  describe('versions that are not x.y.z', () => {
-    const notes = (name, from, to, compare, project, releases) =>
-      postedComment({
-        messages: [updatesBlock(name, from, to, `https://github.com/${project}/compare/${compare}`)],
-        routes: {
-          ...releasesRoute(project, releases),
-          ...compareRoute(project, ...compare.split('...'), []),
-        },
-      })
+  test('does not close a fence the body closed itself', async () => {
+    const comment = await postedComment(withBody(`\`\`\`\ncode\n\`\`\`\n${'x'.repeat(5_000)}`))
 
-    test('reads a major version alone', async () => {
-      const comment = await notes('actions/checkout', '4', '5', 'v4...v5', 'actions/checkout', [
-        release('v5.1.0', 'too new'),
-        release('v5.0.0', 'five notes'),
-        release('v4.0.0', 'too old'),
-      ])
+    assert.match(comment, /x\n\n_… truncated\._/)
+  })
 
-      assert.match(comment, /five notes/)
-      assert.doesNotMatch(comment, /too new|too old/)
+  test('closes an HTML comment the truncation cut', async () => {
+    const comment = await postedComment(withBody(`<!-- ${'x'.repeat(5_000)}`))
+
+    assert.match(comment, /x -->\n\n_… truncated\._/)
+  })
+
+  test('does not mistake a comment opener in code for a comment', async () => {
+    const comment = await postedComment(withBody(`\`\`\`\n<!--\n\`\`\`\n${'x'.repeat(5_000)}`))
+
+    assert.match(comment, /x\n\n_… truncated\._/)
+  })
+
+  test('closes what a short body left open', async () => {
+    const fence = await postedComment(withBody('```\nnever closed'))
+    const html = await postedComment(withBody('<!-- never closed'))
+
+    assert.match(fence, /never closed\n```\n/)
+    assert.match(html, /never closed -->\n/)
+  })
+
+  test('cuts nothing in the middle when a section is over its limit', async () => {
+    const releases = ['1', '2', '3', '4', '5'].map((minor) =>
+      release(`v1.${minor}.0`, `\`\`\`\n${'x'.repeat(3_950)}\n\`\`\``),
+    )
+    const comment = await postedComment({
+      messages: [barUpdate('1.0.0', '1.5.0')],
+      routes: releasesRoute('foo/bar', releases),
     })
 
-    for (const [from, to] of [
-      ['1.1', '1.2'],
-      ['1.2.3.3', '1.2.3.4'],
-      ['2024.01.15', '2024.02.01'],
-    ]) {
-      test(`reads ${from} to ${to}`, async () => {
-        const comment = await notes('foo', from, to, `${from}...${to}`, 'foo/foo', [
-          release(to, 'the notes'),
-          release(from, 'old notes'),
-        ])
+    assert.equal(count(comment, '```') % 2, 0)
+    assert.doesNotMatch(comment, /truncated/)
+  })
 
-        assert.match(comment, /the notes/)
-        assert.doesNotMatch(comment, /old notes/)
-      })
-    }
+  test('strips disclosure tags, but not from code', async () => {
+    const comment = await postedComment(
+      withBody('<details open><summary>More</summary>inner</details>\n\n`<details>`'),
+    )
 
-    test('orders a Python prerelease before its release', async () => {
-      const comment = await notes('foo', '2.0.0rc1', '2.0.0', '2.0.0rc1...2.0.0', 'foo/foo', [
-        release('2.0.0', 'final notes'),
-      ])
+    assert.equal(count(comment, '<details>'), 2)
+    assert.equal(count(comment, '</details>'), 1)
+    assert.ok(comment.includes('Moreinner'))
+  })
+})
 
-      assert.match(comment, /final notes/)
+describe('versions that are not x.y.z', () => {
+  const notes = (name, from, to, compare, project, releases) =>
+    postedComment({
+      messages: [updatesBlock(name, from, to, `https://github.com/${project}/compare/${compare}`)],
+      routes: {
+        ...releasesRoute(project, releases),
+        ...compareRoute(project, ...compare.split('...'), []),
+      },
     })
 
-    test('ignores build metadata', async () => {
-      const comment = await notes('foo', '1.0.0', '2.0.0+incompatible', 'v1.0.0...v2.0.0+incompatible', 'foo/foo', [
-        release('v2.0.0', 'two notes'),
+  test('reads a major version alone', async () => {
+    const comment = await notes('actions/checkout', '4', '5', 'v4...v5', 'actions/checkout', [
+      release('v5.1.0', 'too new'),
+      release('v5.0.0', 'five notes'),
+      release('v4.0.0', 'too old'),
+    ])
+
+    assert.match(comment, /five notes/)
+    assert.doesNotMatch(comment, /too new|too old/)
+  })
+
+  for (const [from, to] of [
+    ['1.1', '1.2'],
+    ['1.2.3.3', '1.2.3.4'],
+    ['2024.01.15', '2024.02.01'],
+  ]) {
+    test(`reads ${from} to ${to}`, async () => {
+      const comment = await notes('foo', from, to, `${from}...${to}`, 'foo/foo', [
+        release(to, 'the notes'),
+        release(from, 'old notes'),
       ])
 
-      assert.match(comment, /two notes/)
+      assert.match(comment, /the notes/)
+      assert.doesNotMatch(comment, /old notes/)
     })
+  }
 
-    test('selects the releases of an npm package by its prefix', async () => {
-      const comment = await notes(
-        '@scope/pkg',
-        '1.0.0',
-        '1.2.0',
-        '%40scope/pkg%401.0.0...%40scope/pkg%401.2.0',
-        'foo/mono',
-        [release('@scope/pkg@1.2.0', 'pkg notes'), release('@scope/other@1.2.0', 'other notes')],
-      )
+  test('orders a Python prerelease before its release', async () => {
+    const comment = await notes('foo', '2.0.0rc1', '2.0.0', '2.0.0rc1...2.0.0', 'foo/foo', [
+      release('2.0.0', 'final notes'),
+    ])
 
-      assert.match(comment, /pkg notes/)
+    assert.match(comment, /final notes/)
+  })
+
+  test('ignores build metadata', async () => {
+    const comment = await notes('foo', '1.0.0', '2.0.0+incompatible', 'v1.0.0...v2.0.0+incompatible', 'foo/foo', [
+      release('v2.0.0', 'two notes'),
+    ])
+
+    assert.match(comment, /two notes/)
+  })
+
+  test('selects the releases of an npm package by its prefix', async () => {
+    const comment = await notes(
+      '@scope/pkg',
+      '1.0.0',
+      '1.2.0',
+      '%40scope/pkg%401.0.0...%40scope/pkg%401.2.0',
+      'foo/mono',
+      [release('@scope/pkg@1.2.0', 'pkg notes'), release('@scope/other@1.2.0', 'other notes')],
+    )
+
+    assert.match(comment, /pkg notes/)
+    assert.doesNotMatch(comment, /other notes/)
+  })
+
+  for (const [from, to] of [
+    ['1.2.3', '1.2.3.post1'],
+    ['release-1.2.3', 'release-1.2.4'],
+  ]) {
+    test(`finds the release tagged ${to} by name`, async () => {
+      const comment = await notes('foo', from, to, `${from}...${to}`, 'foo/foo', [
+        release(to, 'exact notes'),
+        release('v9.0.0', 'other notes'),
+      ])
+
+      assert.match(comment, /exact notes/)
       assert.doesNotMatch(comment, /other notes/)
     })
+  }
+})
 
-    for (const [from, to] of [
-      ['1.2.3', '1.2.3.post1'],
-      ['release-1.2.3', 'release-1.2.4'],
-    ]) {
-      test(`finds the release tagged ${to} by name`, async () => {
-        const comment = await notes('foo', from, to, `${from}...${to}`, 'foo/foo', [
-          release(to, 'exact notes'),
-          release('v9.0.0', 'other notes'),
-        ])
+describe('paging', () => {
+  const page = (start, tag = (index) => `other/v1.0.${index}`) =>
+    Array.from({ length: 100 }, (_, index) => release(tag(start + index), 'filler'))
+  const releasesUrl = (number) =>
+    `GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=${number}`
 
-        assert.match(comment, /exact notes/)
-        assert.doesNotMatch(comment, /other notes/)
-      })
+  test('reads on to a release past the first page', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        [releasesUrl(1)]: ok(page(0)),
+        [releasesUrl(2)]: ok([release('v1.2.0', 'late notes')]),
+      },
+    })
+
+    assert.match(comment, /late notes/)
+  })
+
+  test('reads on past the first page on GitLab', async () => {
+    const url = (number) =>
+      `GET https://gitlab.com/api/v4/projects/foo%2Fbar/releases?per_page=100&page=${number}`
+    const comment = await postedComment({
+      messages: [updatesBlock('foo', '1.0.0', '1.2.0', 'https://gitlab.com/foo/bar/-/compare/v1.0.0...v1.2.0')],
+      routes: {
+        [url(1)]: ok(Array.from({ length: 100 }, (_, index) => ({ tag_name: `x/${index}`, name: 'x' }))),
+        [url(2)]: ok([{ tag_name: 'v1.2.0', name: 'v1.2.0', description: 'late gitlab notes' }]),
+      },
+    })
+
+    assert.match(comment, /late gitlab notes/)
+  })
+
+  // No route covers page 2, so asking for it would fail the test.
+  test('stops once it has reached the base of the range', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        [releasesUrl(1)]: ok([release('v1.2.0', 'bar notes'), release('v1.0.0', 'old'), ...page(0).slice(2)]),
+      },
+    })
+
+    assert.match(comment, /bar notes/)
+  })
+
+  test('stops at the page limit', async () => {
+    const routes = compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [])
+    for (let number = 1; number <= 10; number++) {
+      routes[releasesUrl(number)] = ok(page(number * 100))
     }
+
+    const run = await succeed({ messages: [barUpdate()], routes })
+
+    assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 10)
   })
 
-  describe('paging', () => {
-    const page = (start, tag = (index) => `other/v1.0.${index}`) =>
-      Array.from({ length: 100 }, (_, index) => release(tag(start + index), 'filler'))
-    const releasesUrl = (number) =>
-      `GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=${number}`
-
-    test('reads on to a release past the first page', async () => {
-      const comment = await postedComment({
-        messages: [barUpdate()],
-        routes: {
-          [releasesUrl(1)]: ok(page(0)),
-          [releasesUrl(2)]: ok([release('v1.2.0', 'late notes')]),
-        },
-      })
-
-      assert.match(comment, /late notes/)
+  test('reads the commits of the pull request past the first page', async () => {
+    const filler = Array.from({ length: 100 }, () => 'A commit')
+    const comment = await postedComment({
+      messages: [...filler, barUpdate()],
+      routes: barRoutes('bar notes'),
     })
 
-    test('reads on past the first page on GitLab', async () => {
-      const url = (number) =>
-        `GET https://gitlab.com/api/v4/projects/foo%2Fbar/releases?per_page=100&page=${number}`
-      const comment = await postedComment({
-        messages: [updatesBlock('foo', '1.0.0', '1.2.0', 'https://gitlab.com/foo/bar/-/compare/v1.0.0...v1.2.0')],
-        routes: {
-          [url(1)]: ok(Array.from({ length: 100 }, (_, index) => ({ tag_name: `x/${index}`, name: 'x' }))),
-          [url(2)]: ok([{ tag_name: 'v1.2.0', name: 'v1.2.0', description: 'late gitlab notes' }]),
-        },
-      })
+    assert.match(comment, /bar notes/)
+  })
+})
 
-      assert.match(comment, /late gitlab notes/)
+describe('comments of other authors', () => {
+  const user = (login) => ({ user: { login } })
+
+  test('are never touched, whatever they start with', async () => {
+    const run = await succeed({
+      ...withBody('bar notes'),
+      comments: [{ id: 1, body: `${MARKER}\nNot from the action`, ...user('mallory') }],
     })
 
-    // No route covers page 2, so asking for it would fail the test.
-    test('stops once it has reached the base of the range', async () => {
-      const comment = await postedComment({
-        messages: [barUpdate()],
-        routes: {
-          [releasesUrl(1)]: ok([release('v1.2.0', 'bar notes'), release('v1.0.0', 'old'), ...page(0).slice(2)]),
-        },
-      })
-
-      assert.match(comment, /bar notes/)
-    })
-
-    test('stops at the page limit', async () => {
-      const routes = compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [])
-      for (let number = 1; number <= 10; number++) {
-        routes[releasesUrl(number)] = ok(page(number * 100))
-      }
-
-      const run = await succeed({ messages: [barUpdate()], routes })
-
-      assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 10)
-    })
-
-    test('reads the commits of the pull request past the first page', async () => {
-      const filler = Array.from({ length: 100 }, () => 'A commit')
-      const comment = await postedComment({
-        messages: [...filler, barUpdate()],
-        routes: barRoutes('bar notes'),
-      })
-
-      assert.match(comment, /bar notes/)
-    })
+    assert.equal(run.posted.length, 1)
+    assert.deepEqual(run.patched, [])
+    assert.deepEqual(run.deleted, [])
   })
 
-  describe('comments of other authors', () => {
-    const user = (login) => ({ user: { login } })
-
-    test('are never touched, whatever they start with', async () => {
-      const run = await succeed({
-        ...withBody('bar notes'),
-        comments: [{ id: 1, body: `${MARKER}\nNot from the action`, ...user('mallory') }],
-      })
-
-      assert.equal(run.posted.length, 1)
-      assert.deepEqual(run.patched, [])
-      assert.deepEqual(run.deleted, [])
+  test('are not counted as a part', async () => {
+    const run = await succeed({
+      ...withBody('bar notes'),
+      comments: [
+        { id: 1, body: `${MARKER}\nPlanted`, ...user('mallory') },
+        { id: 2, body: `${MARKER}\nStale` },
+      ],
     })
 
-    test('are not counted as a part', async () => {
-      const run = await succeed({
-        ...withBody('bar notes'),
-        comments: [
-          { id: 1, body: `${MARKER}\nPlanted`, ...user('mallory') },
-          { id: 2, body: `${MARKER}\nStale` },
-        ],
-      })
-
-      assert.deepEqual(run.patched.map((comment) => comment.id), [2])
-    })
-
-    test('are the action\'s own under the configured author', async () => {
-      const run = await succeed({
-        ...withBody('bar notes'),
-        env: { COMMENT_AUTHOR: 'release-bot' },
-        comments: [
-          { id: 1, body: `${MARKER}\nStale`, ...user('release-bot') },
-          { id: 2, body: `${MARKER}\nStale` },
-        ],
-      })
-
-      assert.deepEqual(run.patched.map((comment) => comment.id), [1])
-      assert.deepEqual(run.deleted, [])
-    })
+    assert.deepEqual(run.patched.map((comment) => comment.id), [2])
   })
 
-  describe('a pull request that cannot be read', () => {
-    for (const path of ['commits', 'files']) {
-      test(`fails on a 404 from ${path}`, async () => {
-        const run = await runAction({
-          messages: ['Fix a typo'],
-          routes: { [`GET ${API}/pulls/${PULL_REQUEST}/${path}?per_page=100&page=1`]: notFound },
-        })
+  test('are the action\'s own under the configured author', async () => {
+    const run = await succeed({
+      ...withBody('bar notes'),
+      env: { COMMENT_AUTHOR: 'release-bot' },
+      comments: [
+        { id: 1, body: `${MARKER}\nStale`, ...user('release-bot') },
+        { id: 2, body: `${MARKER}\nStale` },
+      ],
+    })
 
-        assert.notEqual(run.code, 0)
-        assert.match(run.stderr, /check the pull request number/)
-      })
-    }
+    assert.deepEqual(run.patched.map((comment) => comment.id), [1])
+    assert.deepEqual(run.deleted, [])
   })
+})
 
-  describe('nothing left to report', () => {
-    test('deletes the comments of earlier runs', async () => {
-      const run = await succeed({
+describe('a pull request that cannot be read', () => {
+  for (const path of ['commits', 'files']) {
+    test(`fails on a 404 from ${path}`, async () => {
+      const run = await runAction({
         messages: ['Fix a typo'],
-        comments: [
-          { id: 1, body: `${MARKER}\nOld` },
-          { id: 2, body: `${MARKER}\nOld too` },
-          { id: 3, body: 'A reviewer said something' },
-        ],
+        routes: { [`GET ${API}/pulls/${PULL_REQUEST}/${path}?per_page=100&page=1`]: notFound },
       })
 
-      assert.match(run.stdout, /nothing to post/)
-      assert.deepEqual(run.deleted, [1, 2])
-      assert.deepEqual(run.posted, [])
+      assert.notEqual(run.code, 0)
+      assert.match(run.stderr, /check the pull request number/)
+    })
+  }
+})
+
+describe('nothing left to report', () => {
+  test('deletes the comments of earlier runs', async () => {
+    const run = await succeed({
+      messages: ['Fix a typo'],
+      comments: [
+        { id: 1, body: `${MARKER}\nOld` },
+        { id: 2, body: `${MARKER}\nOld too` },
+        { id: 3, body: 'A reviewer said something' },
+      ],
     })
 
-    test('writes nothing on a dry run', async () => {
-      const run = await succeed({
-        messages: ['Fix a typo'],
-        args: ['--dry-run'],
-        comments: [{ id: 1, body: `${MARKER}\nOld` }],
-      })
-
-      assert.match(run.stdout, /nothing to post/)
-      assert.deepEqual(run.deleted, [])
-    })
+    assert.match(run.stdout, /nothing to post/)
+    assert.deepEqual(run.deleted, [1, 2])
+    assert.deepEqual(run.posted, [])
   })
 
-  describe('references', () => {
-    test('sends links to github.com through the redirect host', async () => {
-      const comment = await postedComment(
-        withBody('by me in https://github.com/org/repo/pull/123 and [the fix](https://github.com/org/repo/pull/4)'),
-      )
-
-      assert.ok(comment.includes('in https://redirect.github.com/org/repo/pull/123 and'))
-      assert.ok(comment.includes('[the fix](https://redirect.github.com/org/repo/pull/4)'))
-      assert.ok(!comment.includes('https://github.com/org/repo/pull/123'))
+  test('writes nothing on a dry run', async () => {
+    const run = await succeed({
+      messages: ['Fix a typo'],
+      args: ['--dry-run'],
+      comments: [{ id: 1, body: `${MARKER}\nOld` }],
     })
 
-    test('quiets the links of commits and releases, not of the compare link', async () => {
-      const comment = await postedComment({
-        messages: [barUpdate()],
-        routes: {
-          ...releasesRoute('foo/bar', []),
-          ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [
-            upstreamCommit('A commit', 'https://github.com/foo/bar/commit/abc'),
-          ]),
-        },
-      })
+    assert.match(run.stdout, /nothing to post/)
+    assert.deepEqual(run.deleted, [])
+  })
+})
 
-      assert.ok(comment.includes('(https://redirect.github.com/foo/bar/commit/abc)'))
-      assert.ok(comment.includes('[Commits](https://github.com/foo/bar/compare/'))
+describe('references', () => {
+  test('sends links to github.com through the redirect host', async () => {
+    const comment = await postedComment(
+      withBody('by me in https://github.com/org/repo/pull/123 and [the fix](https://github.com/org/repo/pull/4)'),
+    )
 
-      const released = await postedComment({
-        messages: [barUpdate()],
-        routes: releasesRoute('foo/bar', [
-          release('v1.2.0', 'notes', { html_url: 'https://github.com/foo/bar/releases/tag/v1.2.0' }),
+    assert.ok(comment.includes('in https://redirect.github.com/org/repo/pull/123 and'))
+    assert.ok(comment.includes('[the fix](https://redirect.github.com/org/repo/pull/4)'))
+    assert.ok(!comment.includes('https://github.com/org/repo/pull/123'))
+  })
+
+  test('quiets the links of commits and releases, not of the compare link', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        ...releasesRoute('foo/bar', []),
+        ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', [
+          upstreamCommit('A commit', 'https://github.com/foo/bar/commit/abc'),
         ]),
-      })
-
-      assert.ok(released.includes('(https://redirect.github.com/foo/bar/releases/tag/v1.2.0)'))
+      },
     })
 
-    test('leaves other hosts alone', async () => {
-      const comment = await postedComment(withBody('https://notgithub.com/a https://example.test/github.com/a'))
+    assert.ok(comment.includes('(https://redirect.github.com/foo/bar/commit/abc)'))
+    assert.ok(comment.includes('[Commits](https://github.com/foo/bar/compare/'))
 
-      assert.ok(comment.includes('https://notgithub.com/a https://example.test/github.com/a'))
+    const released = await postedComment({
+      messages: [barUpdate()],
+      routes: releasesRoute('foo/bar', [
+        release('v1.2.0', 'notes', { html_url: 'https://github.com/foo/bar/releases/tag/v1.2.0' }),
+      ]),
     })
 
-    for (const [what, text] of [
-      ['a URL with an anchor', 'https://example.test/guide#install'],
-      ['a URL with an @', 'https://example.test/tag/pkg@1.2.3'],
-      ['a link to an anchor', '[up](#install)'],
-      ['a link with an anchor', '[docs](https://example.test/guide#install)'],
-      ['inline code', '`npm i @scope/pkg #1`'],
-      ['a fenced block', '```\nnpm i @scope/pkg\n#1\n```'],
-      ['a package version', 'pkg@1.2.3'],
-    ]) {
-      test(`leaves ${what} intact`, async () => {
-        const comment = await postedComment(withBody(text))
-
-        assert.ok(comment.includes(text), comment)
-      })
-    }
-
-    for (const [what, text, defused] of [
-      ['a handle in parentheses', '(@alice)', `(@${ZERO_WIDTH_SPACE}alice)`],
-      ['an issue in another repository', 'org/repo#123', `org/repo#${ZERO_WIDTH_SPACE}123`],
-      ['an issue of another owner', 'owner#123', `owner#${ZERO_WIDTH_SPACE}123`],
-      ['a handle beside code', '`a` @alice `b`', `\`a\` @${ZERO_WIDTH_SPACE}alice \`b\``],
-    ]) {
-      test(`defuses ${what}`, async () => {
-        const comment = await postedComment(withBody(text))
-
-        assert.ok(comment.includes(defused), comment)
-      })
-    }
+    assert.ok(released.includes('(https://redirect.github.com/foo/bar/releases/tag/v1.2.0)'))
   })
+
+  test('leaves other hosts alone', async () => {
+    const comment = await postedComment(withBody('https://notgithub.com/a https://example.test/github.com/a'))
+
+    assert.ok(comment.includes('https://notgithub.com/a https://example.test/github.com/a'))
+  })
+
+  for (const [what, text] of [
+    ['a URL with an anchor', 'https://example.test/guide#install'],
+    ['a URL with an @', 'https://example.test/tag/pkg@1.2.3'],
+    ['a link to an anchor', '[up](#install)'],
+    ['a link with an anchor', '[docs](https://example.test/guide#install)'],
+    ['inline code', '`npm i @scope/pkg #1`'],
+    ['a fenced block', '```\nnpm i @scope/pkg\n#1\n```'],
+    ['a package version', 'pkg@1.2.3'],
+  ]) {
+    test(`leaves ${what} intact`, async () => {
+      const comment = await postedComment(withBody(text))
+
+      assert.ok(comment.includes(text), comment)
+    })
+  }
+
+  for (const [what, text, defused] of [
+    ['a handle in parentheses', '(@alice)', `(@${ZERO_WIDTH_SPACE}alice)`],
+    ['an issue in another repository', 'org/repo#123', `org/repo#${ZERO_WIDTH_SPACE}123`],
+    ['an issue of another owner', 'owner#123', `owner#${ZERO_WIDTH_SPACE}123`],
+    ['a handle beside code', '`a` @alice `b`', `\`a\` @${ZERO_WIDTH_SPACE}alice \`b\``],
+  ]) {
+    test(`defuses ${what}`, async () => {
+      const comment = await postedComment(withBody(text))
+
+      assert.ok(comment.includes(defused), comment)
+    })
+  }
+})
+
+describe('Dependabot link forms', () => {
+  const babel = (form = 'Bumps [@babel/core](https://github.com/babel/babel/tree/HEAD/packages/babel-core) from 7.24.0 to 7.25.0.') =>
+    `${form}\n- [Release notes](https://github.com/babel/babel/releases)\n- [Commits](https://github.com/babel/babel/commits/v7.25.0/packages/babel-core)`
+
+  test('reads the releases of a package linked by its directory', async () => {
+    const comment = await postedComment({
+      messages: [babel()],
+      routes: releasesRoute('babel/babel', [
+        release('v7.25.0', 'new notes'),
+        release('v7.24.0', 'old notes'),
+      ]),
+    })
+
+    assert.match(comment, /new notes/)
+    assert.doesNotMatch(comment, /old notes/)
+  })
+
+  test('reads the form that names the directory ahead of the versions', async () => {
+    const comment = await postedComment({
+      messages: [
+        'Bumps [react-dom](https://github.com/react/react/tree/HEAD/packages/react-dom) in `/games` from 19.2.8 to 19.3.0.\n- [Commits](https://github.com/react/react/commits/v19.3.0/packages/react-dom)',
+      ],
+      routes: releasesRoute('react/react', [release('v19.3.0', 'react notes')]),
+    })
+
+    assert.match(comment, /react-dom<\/code> — 19\.2\.8 → 19\.3\.0/)
+    assert.match(comment, /react notes/)
+  })
+
+  test('reads a tag with a package in it off the commits link', async () => {
+    const comment = await postedComment({
+      messages: [
+        'Bumps [@sveltejs/kit](https://github.com/sveltejs/kit/tree/HEAD/packages/kit) from 3.0.1 to 3.1.0.\n- [Commits](https://github.com/sveltejs/kit/commits/@sveltejs/kit@3.1.0/packages/kit)',
+      ],
+      routes: releasesRoute('sveltejs/kit', [
+        release('@sveltejs/package@3.1.0', 'other package'),
+        release('@sveltejs/kit@3.1.0', 'kit notes'),
+      ]),
+    })
+
+    assert.match(comment, /kit notes/)
+    assert.doesNotMatch(comment, /other package/)
+  })
+
+  test('finds tags by package from a table row, which gives only the project', async () => {
+    const comment = await postedComment({
+      messages: ['| [@sveltejs/kit](https://github.com/sveltejs/kit/tree/HEAD/packages/kit) | `3.0.1` | `3.1.0` |'],
+      routes: releasesRoute('sveltejs/kit', [
+        release('@sveltejs/package@3.1.0', 'other package'),
+        release('@sveltejs/kit@3.1.0', 'kit notes'),
+      ]),
+    })
+
+    assert.match(comment, /kit notes/)
+    assert.doesNotMatch(comment, /other package/)
+  })
+
+  test('lists commits under the tag spelled after the package', async () => {
+    const empty = (base, head) => compareRoute('foo/mono', base, head, [])
+    const comment = await postedComment({
+      messages: ['| [pkg](https://github.com/foo/mono/tree/HEAD/packages/pkg) | `1.0.0` | `1.1.0` |'],
+      routes: {
+        ...releasesRoute('foo/mono', []),
+        ...empty('v1.0.0', 'v1.1.0'),
+        ...empty('1.0.0', '1.1.0'),
+        ...compareRoute('foo/mono', 'pkg@1.0.0', 'pkg@1.1.0', [upstreamCommit('Package commit')]),
+      },
+    })
+
+    assert.match(comment, /Package commit/)
+  })
+
+  test('refuses a link that climbs out of the API path', async () => {
+    const run = await succeed({
+      messages: [updatesBlock('x', '1.0.0', '2.0.0', 'https://github.com/foo/bar/compare/../../user...v2')],
+    })
+
+    assert.ok(!run.requests.some((request) => request.url.includes('..')))
+  })
+})
+
+describe('commit hashes', () => {
+  const [from, to] = [`4${'a'.repeat(39)}`, `6${'b'.repeat(39)}`]
+  const pseudo = updatesBlock('x/y', '0.0.0-1', '0.0.0-2', `https://github.com/x/y/compare/${from}...${to}`)
+
+  test('name no release, and only the commits are read', async () => {
+    const run = await succeed({
+      messages: [pseudo],
+      routes: compareRoute('x/y', from, to, [upstreamCommit('The change')]),
+    })
+
+    assert.match(run.posted[0], /The change/)
+    assert.ok(!run.requests.some((request) => request.url.includes('/releases')))
+  })
+})
+
+describe('temporary failures', () => {
+  const releases = 'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1'
+  const compare = 'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0'
+  const down = { [releases]: { status: 502, body: {} }, [compare]: { status: 502, body: {} } }
+
+  test('are retried', async () => {
+    const run = await runAction({ messages: [barUpdate()], routes: down })
+
+    assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 3)
+  })
+
+  test('keep the comments of an earlier run and exit 1', async () => {
+    const run = await runAction({
+      messages: [barUpdate()],
+      comments: [{ id: 1, body: `${MARKER}\ngood notes` }],
+      routes: down,
+    })
+
+    assert.equal(run.code, 1)
+    assert.deepEqual(run.patched, [])
+    assert.deepEqual(run.deleted, [])
+  })
+
+  test('post what there is when there is nothing to keep, and exit 1', async () => {
+    const run = await runAction({ messages: [barUpdate()], routes: down })
+
+    assert.equal(run.code, 1)
+    assert.equal(run.posted.length, 1)
+  })
+
+  test('stop the lookups once rate limited', async () => {
+    const limited = { status: 429, body: {} }
+    const other = updatesBlock('github.com/foo/ok', '1.0.0', '1.1.0', 'https://github.com/foo/ok/compare/v1.0.0...v1.1.0')
+    const run = await runAction({
+      messages: [`${barUpdate()}\n\n${other}`],
+      routes: { [releases]: limited },
+    })
+
+    assert.equal(run.code, 1)
+    assert.ok(!run.requests.some((request) => request.url.includes('/foo/ok/')))
+  })
+})
+
+describe('writes', () => {
+  test('fail on a 404', async () => {
+    const run = await runAction({
+      messages: [barUpdate()],
+      routes: {
+        ...releasesRoute('foo/bar', [release('v1.2.0', 'notes')]),
+        [`POST ${COMMENTS_URL}`]: notFound,
+      },
+    })
+
+    assert.notEqual(run.code, 0)
+  })
+})
+
+describe('pull request author', () => {
+  const opened = (login) => ({ [`GET ${API}/pulls/${PULL_REQUEST}`]: ok({ user: { login } }) })
+
+  test('must be Dependabot', async () => {
+    const run = await runAction({ messages: [barUpdate()], routes: opened('someone') })
+
+    assert.notEqual(run.code, 0)
+    assert.match(run.stderr, /opened by someone/)
+    assert.deepEqual(run.posted, [])
+  })
+
+  test('may be anyone with any-author set', async () => {
+    const run = await succeed({
+      messages: [barUpdate()],
+      env: { 'INPUT_ANY-AUTHOR': 'true' },
+      routes: { ...opened('someone'), ...releasesRoute('foo/bar', [release('v1.2.0', 'notes')]) },
+    })
+
+    assert.equal(run.posted.length, 1)
+  })
+})
+
+describe('action inputs', () => {
+  test('stand in for the local variables', async () => {
+    const run = await succeed({
+      messages: [barUpdate()],
+      env: { GITHUB_TOKEN: '', PR_NUMBER: '', INPUT_TOKEN: TOKEN, 'INPUT_PULL-REQUEST': PULL_REQUEST },
+      routes: releasesRoute('foo/bar', [release('v1.2.0', 'notes')]),
+    })
+
+    assert.equal(run.posted.length, 1)
+  })
+})
+
+describe('rendering, further', () => {
+  const body = (text) => ({
+    messages: [barUpdate()],
+    routes: releasesRoute('foo/bar', [release('v1.2.0', text)]),
+  })
+
+  test('defuses GH- references', async () => {
+    const comment = await postedComment(body('Fixes GH-123, not `GH-124`'))
+
+    assert.ok(comment.includes(`GH${ZERO_WIDTH_SPACE}-123`))
+    assert.ok(comment.includes('`GH-124`'))
+  })
+
+  test('names the repository for packages that share no path', async () => {
+    const shared = (name) => updatesBlock(name, '1.0.0', '2.0.0', `https://github.com/f/r/compare/${name}-1...${name}-2`)
+    const comment = await postedComment({
+      messages: [`${shared('react')}\n\n${shared('react-dom')}`],
+      routes: {
+        ...releasesRoute('f/r', []),
+        ...compareRoute('f/r', 'react-1', 'react-2', [upstreamCommit('c')]),
+        ...compareRoute('f/r', 'react-dom-1', 'react-dom-2', [upstreamCommit('c')]),
+      },
+    })
+
+    assert.match(comment, /<code>f\/r<\/code> — 2 packages/)
+  })
+
+  test('counts commits past what the compare returned', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        ...releasesRoute('foo/bar', []),
+        'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': ok({
+          total_commits: 2493,
+          commits: Array.from({ length: 250 }, (_, index) => upstreamCommit(`Commit ${index}`)),
+        }),
+      },
+    })
+
+    assert.match(comment, /… and 2473 earlier\./)
+    assert.match(comment, /Commit 249]/)
+  })
+
+  test('keeps the links of undescribed releases when there are no commits', async () => {
+    const comment = await postedComment({
+      messages: [barUpdate()],
+      routes: {
+        ...releasesRoute('foo/bar', [release('v1.2.0', '')]),
+        ...compareRoute('foo/bar', 'v1.0.0', 'v1.2.0', []),
+      },
+    })
+
+    assert.match(comment, /example\.test\/releases\/v1\.2\.0/)
+    assert.match(comment, /No release notes\./)
+  })
+
+  test('closes an HTML block a body leaves open', async () => {
+    const comment = await postedComment(body('<table><tr><td>cell'))
+
+    assert.match(comment, /<\/table>\n/)
+  })
+
+  test('does not leave a tag cut in half', async () => {
+    const comment = await postedComment(body(`${'x'.repeat(3_990)} <img src="https://example.test/a.png">`))
+
+    assert.doesNotMatch(comment, /<img/)
+  })
+})
+
+test('reads past a backport published after the versions above it', async () => {
+  const page = Array.from({ length: 100 }, (_, index) => release(`v1.0.${index + 10}`, 'backport'))
+  const comment = await postedComment({
+    messages: [updatesBlock('github.com/foo/bar', '2.0.0', '2.1.0', 'https://github.com/foo/bar/compare/v2.0.0...v2.1.0')],
+    routes: {
+      'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': ok(page),
+      'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=2': ok([
+        release('v2.1.0', 'wanted notes'),
+        release('v2.0.0', 'base notes'),
+      ]),
+    },
+  })
+
+  assert.match(comment, /wanted notes/)
+})
+
+test('reads past a base that is itself a backport', async () => {
+  const comment = await postedComment({
+    messages: [updatesBlock('github.com/foo/bar', '20.3.5', '21.1.0', 'https://github.com/foo/bar/compare/v20.3.5...v21.1.0')],
+    routes: {
+      'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': ok([
+        release('v21.1.0', 'newest notes'),
+        release('v20.3.5', 'base notes'),
+        ...Array.from({ length: 98 }, (_, index) => release(`v19.0.${index + 1}`, 'older branch')),
+      ]),
+      'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=2': ok([
+        release('v21.0.0', 'major notes'),
+        release('v20.3.0', 'branch start'),
+      ]),
+    },
+  })
+
+  assertInOrder(comment, 'major notes', 'newest notes')
+})
+
+test('an exclude block is not a requirement', async () => {
+  const run = await succeed({
+    messages: ['Fix a typo'],
+    files: [{ filename: 'go.mod', patch: '@@ -1,3 +1,3 @@ exclude (\n-\tfoo.test/a v1.0.0\n+\tfoo.test/a v1.1.0\n )' }],
+  })
+
+  assert.deepEqual(run.posted, [])
 })

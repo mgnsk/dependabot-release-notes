@@ -36,14 +36,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: mgnsk/dependabot-release-notes@v1
+      - uses: mgnsk/dependabot-release-notes@<commit-sha> # v1
         with:
           pull-request: ${{ github.event.pull_request.number || inputs.pull-request }}
 ```
 
-The job runs with a write token, so it must never check out or execute the code under review. It needs no checkout at all.
+The job runs with a write token, so it must never check out or execute the code under review. It needs no checkout at all. For the same reason, pin the action to a full commit SHA rather than a tag that can move.
 
-The runner must have `node` on its `PATH`, which GitHub-hosted runners do.
+The action refuses a pull request that Dependabot did not open, unless `any-author` is set, so that `workflow_dispatch` cannot be pointed at commit messages written by anyone else.
+
+A temporary failure, such as a rate limit or a 5xx that persists through retries, fails the run. Comments from an earlier run are then left as they are; with none to keep, the action posts what it has.
 
 ## Inputs
 
@@ -52,6 +54,7 @@ The runner must have `node` on its `PATH`, which GitHub-hosted runners do.
 | `token` | `github.token` | Token that reads the pull request and writes its comments |
 | `pull-request` | The triggering pull request | Pull request number to comment on |
 | `author` | `github-actions[bot]` | Login that the token posts as, whose comments the action may edit and delete. Set it when `token` belongs to another account |
+| `any-author` | `false` | Run on a pull request that Dependabot did not open |
 
 ## Running locally
 
@@ -67,5 +70,5 @@ GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo PR_NUMBER=123 \
 The tests run the script as a subprocess against a fake network and need nothing installed:
 
 ```sh
-node --test "test/*.test.mjs"
+node --test
 ```

@@ -68,6 +68,7 @@ export function goModFile(changes, filename = 'go.mod') {
 function defaultRoutes(messages, files, comments) {
   const routes = {
     [`POST ${API}/issues/${PULL_REQUEST}/comments`]: { status: 201, body: {} },
+    [`GET ${API}/pulls/${PULL_REQUEST}`]: ok({ user: { login: 'dependabot[bot]' } }),
   }
 
   const paginate = (path, items) => {
@@ -123,6 +124,7 @@ export async function runAction({
         PR_NUMBER: PULL_REQUEST,
         FAKE_FETCH_ROUTES: routesFile,
         FAKE_FETCH_LOG: logFile,
+        RETRY_DELAY_MS: '0',
         ...env,
       },
     }).then(
