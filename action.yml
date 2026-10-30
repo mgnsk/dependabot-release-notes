@@ -1,0 +1,19 @@
+name: Dependabot release notes
+description: Post the release notes of a Dependabot pull request as comments, past the description's size limit
+
+inputs:
+  token:
+    description: Token that reads the pull request and writes its comments
+    default: ${{ github.token }}
+  pull-request:
+    description: Pull request number to comment on
+    default: ${{ github.event.pull_request.number }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: node "$GITHUB_ACTION_PATH/dependabot-release-notes.mjs"
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ inputs.pull-request }}
