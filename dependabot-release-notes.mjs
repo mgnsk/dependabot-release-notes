@@ -253,17 +253,15 @@ function parseRequirementChanges(files) {
   return [...changes.values()]
 }
 
-async function pullRequestFiles() {
-  const files = []
+async function listAll(path) {
+  const items = []
 
   for (let page = 1; ; page++) {
-    const batch =
-      (await api(`/repos/${repository}/pulls/${pullRequest}/files?per_page=100&page=${page}`)) ??
-      []
-    files.push(...batch)
+    const batch = (await api(`${path}?per_page=100&page=${page}`)) ?? []
+    items.push(...batch)
 
     if (batch.length < 100) {
-      return files
+      return items
     }
   }
 }
@@ -328,7 +326,7 @@ function parseCompareLink(url) {
     return null
   }
 
-  return { forge: FORGES[compare[1]], project: compare[2], base, head }
+  return { host: compare[1], forge: FORGES[compare[1]], project: compare[2], base, head }
 }
 
 // A module that sits in a subdirectory of its repository is tagged with that
@@ -354,6 +352,7 @@ function compareFromProject(update) {
   const prefix = tagPrefix(update.name, `${host}/${path}`)
 
   return {
+    host,
     forge: FORGES[host],
     project: path,
     base: `${prefix}v${update.from}`,
@@ -397,14 +396,37 @@ function compareVersions(left, right) {
     return -1
   }
 
-  return left.prerelease < right.prerelease ? -1 : 1
+  return comparePrereleases(left.prerelease.split('.'), right.prerelease.split('.'))
+}
+
+// Semver order: numeric identifiers compare as numbers and sort before the
+// others, and a shorter list sorts before a longer one it is the start of.
+function comparePrereleases(left, right) {
+  for (let index = 0; index < Math.min(left.length, right.length); index++) {
+    const [a, b] = [left[index], right[index]]
+    if (a === b) {
+      continue
+    }
+
+    const [aNumeric, bNumeric] = [/^\d+$/.test(a), /^\d+$/.test(b)]
+    if (aNumeric && bNumeric) {
+      return Number(a) - Number(b)
+    }
+    if (aNumeric !== bNumeric) {
+      return aNumeric ? -1 : 1
+    }
+
+    return a < b ? -1 : 1
+  }
+
+  return left.length - right.length
 }
 
 const releaseCache = new Map()
 
 // One project supplies many of the modules in a single update, so ask it once.
 async function listReleases(compare) {
-  const key = `${compare.project}`
+  const key = `${compare.host}/${compare.project}`
   if (!releaseCache.has(key)) {
     releaseCache.set(key, await compare.forge.releases(compare.project))
   }
@@ -603,15 +625,16 @@ function intoComments(sections) {
 }
 
 async function previousComments() {
-  const comments =
-    (await api(`/repos/${repository}/issues/${pullRequest}/comments?per_page=100`)) ?? []
+  const comments = await listAll(`/repos/${repository}/issues/${pullRequest}/comments`)
 
   return comments.filter((comment) => comment.body?.startsWith(MARKER))
 }
 
 const commits = await api(`/repos/${repository}/pulls/${pullRequest}/commits?per_page=100`)
 const announced = parseUpdates((commits ?? []).map((commit) => commit.commit.message).join('\n'))
-const requirementChanges = parseRequirementChanges(await pullRequestFiles())
+const requirementChanges = parseRequirementChanges(
+  await listAll(`/repos/${repository}/pulls/${pullRequest}/files`),
+)
 
 const byRange = new Map(
   announced.map((update) => [`${update.name}@${update.from}...${update.to}`, update]),

@@ -60,3 +60,11 @@ The runner must have `node` on its `PATH`, which GitHub-hosted runners do.
 GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo PR_NUMBER=123 \
   node dependabot-release-notes.mjs --dry-run
 ```
+
+## Testing
+
+The tests run the script as a subprocess against a fake network and need nothing installed:
+
+```sh
+node --test "test/*.test.mjs"
+```
