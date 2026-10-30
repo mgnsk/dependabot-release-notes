@@ -266,6 +266,45 @@ describe('a pull request with a lockfile', () => {
     assert.match(run.posted[0], /\| `z\/deep` .*\| indirect \| Not read \|/)
   })
 
+  const oldLock = (version) => JSON.stringify({ dependencies: { old: { version } } })
+
+  test('from before npm 7 leaves out a scope no lockfile can tell', async () => {
+    const run = await runAction({
+      files,
+      routes: {
+        ...commitsRoute([commit]),
+        ...notes,
+        ...file('package-lock.json', 'base', oldLock('1.0.0')),
+        ...file('package-lock.json', 'head', oldLock('1.1.0')),
+      },
+    })
+
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.posted[0], /\| Package \| Update \| Bump \| Notes \|/)
+    assert.match(run.posted[0], /\| `old` \| `1\.0\.0` → `1\.1\.0` \| minor \| Not read \|/)
+  })
+
+  test('from before npm 7 does not call a package direct next to one that can tell', async () => {
+    const run = await runAction({
+      files: [
+        { filename: 'old/package-lock.json', status: 'modified' },
+        { filename: 'new/package-lock.json', status: 'modified' },
+      ],
+      routes: {
+        ...commitsRoute([commit]),
+        ...notes,
+        ...file('old/package-lock.json', 'base', oldLock('1.0.0')),
+        ...file('old/package-lock.json', 'head', oldLock('1.1.0')),
+        ...file('new/package-lock.json', 'base', npm('1.0.0', '2.0.0')),
+        ...file('new/package-lock.json', 'head', npm('1.1.0', '2.0.0')),
+      },
+    })
+
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.posted[0], /\| `a` .*\| direct \|/)
+    assert.match(run.posted[0], /\| `old` .*\| — \| Not read \|/)
+  })
+
   test('survives a lockfile it cannot parse', async () => {
     const run = await runAction({
       files,

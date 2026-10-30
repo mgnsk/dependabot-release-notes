@@ -1636,7 +1636,8 @@ function renderOverview(entries, listed = []) {
   let length = 0
   let shown = 0
   for (const { update, notes } of rows) {
-    const scope = update.indirect ? 'indirect' : 'direct'
+    // A lockfile from before npm 7 does not say, and neither does an ecosystem without one.
+    const scope = update.indirect === undefined ? '—' : update.indirect ? 'indirect' : 'direct'
     const line =
       `| \`${update.name}\` | \`${shortRef(update.from)}\` → \`${shortRef(update.to)}\` | ` +
       `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notes} |`
