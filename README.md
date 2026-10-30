@@ -51,6 +51,7 @@ The runner must have `node` on its `PATH`, which GitHub-hosted runners do.
 | --- | --- | --- |
 | `token` | `github.token` | Token that reads the pull request and writes its comments |
 | `pull-request` | The triggering pull request | Pull request number to comment on |
+| `author` | `github-actions[bot]` | Login that the token posts as, whose comments the action may edit and delete. Set it when `token` belongs to another account |
 
 ## Running locally
 

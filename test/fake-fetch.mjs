@@ -28,5 +28,6 @@ globalThis.fetch = async (url, init = {}) => {
 
   return new Response(route.status === 204 ? null : JSON.stringify(route.body), {
     status: route.status,
+    headers: route.headers,
   })
 }

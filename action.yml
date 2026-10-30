@@ -8,6 +8,9 @@ inputs:
   pull-request:
     description: Pull request number to comment on
     default: ${{ github.event.pull_request.number }}
+  author:
+    description: Login that the token posts as, whose comments the action may edit and delete
+    default: github-actions[bot]
 
 runs:
   using: composite
@@ -17,3 +20,4 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         PR_NUMBER: ${{ inputs.pull-request }}
+        COMMENT_AUTHOR: ${{ inputs.author }}

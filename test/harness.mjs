@@ -23,7 +23,7 @@ export const ok = (body) => ({ status: 200, body })
 export const notFound = { status: 404, body: { message: 'Not Found' } }
 
 export function releasesRoute(project, releases) {
-  return { [`GET https://api.github.com/repos/${project}/releases?per_page=100`]: ok(releases) }
+  return { [`GET https://api.github.com/repos/${project}/releases?per_page=100&page=1`]: ok(releases) }
 }
 
 export function compareRoute(project, base, head, commits) {
@@ -67,9 +67,6 @@ export function goModFile(changes, filename = 'go.mod') {
 
 function defaultRoutes(messages, files, comments) {
   const routes = {
-    [`GET ${API}/pulls/${PULL_REQUEST}/commits?per_page=100`]: ok(
-      messages.map((message) => ({ commit: { message } })),
-    ),
     [`POST ${API}/issues/${PULL_REQUEST}/comments`]: { status: 201, body: {} },
   }
 
@@ -81,8 +78,15 @@ function defaultRoutes(messages, files, comments) {
     }
   }
 
+  paginate(
+    `/pulls/${PULL_REQUEST}/commits`,
+    messages.map((message) => ({ commit: { message } })),
+  )
   paginate(`/pulls/${PULL_REQUEST}/files`, files)
-  paginate(`/issues/${PULL_REQUEST}/comments`, comments)
+  paginate(
+    `/issues/${PULL_REQUEST}/comments`,
+    comments.map((comment) => ({ user: { login: 'github-actions[bot]' }, ...comment })),
+  )
 
   for (const { id } of comments) {
     routes[`PATCH ${API}/issues/comments/${id}`] = ok({})
