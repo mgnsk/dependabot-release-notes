@@ -6,6 +6,21 @@ GitHub caps a pull request description at 65,536 characters. A grouped update ac
 
 The action reads the dependencies from the commit messages, the description and the `go.mod` changes in the diff, then collects the notes from GitHub and GitLab. A project that publishes no release notes gets the versions from the changelog Dependabot links, or else the list of commits in the range. An update of several packages opens with an overview of them, Go's indirect requirements marked and listed last, and packages with the same notes share a section. Later pushes edit the existing comments rather than posting new ones.
 
+## Supported ecosystems
+
+The action reads what Dependabot writes rather than the files of each language, so it is meant to work with any ecosystem Dependabot updates. Only Go gets more: its `go.mod` changes also reveal the indirect requirements and the ones a `go mod tidy` moved. Notes come from GitHub and GitLab only.
+
+| Ecosystem | What to expect |
+| --- | --- |
+| npm, pip, Cargo, Composer, Bundler, Terraform, Go | Release notes or changelog excerpts, when Dependabot links a project on GitHub or GitLab |
+| NuGet | The same, with the versions read from the description |
+| Maven | The same, though older projects often have no release for a tag |
+| GitHub Actions | The same for version tags, and a list of commits for an action pinned to a commit hash |
+| Git submodules | A list of commits |
+| Docker | Usually no notes, since Dependabot links no project for an image such as `alpine` |
+
+The ecosystems above were tried on real pull requests. Others, such as Gradle, Swift, Hex and Pub, have not been tried. An update whose message the action cannot read gets no section, and a pull request with none of them logs "nothing to post" and still succeeds.
+
 ## Usage
 
 ```yaml
