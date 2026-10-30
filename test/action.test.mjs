@@ -45,7 +45,11 @@ function manyProjects(total, bodyLength) {
     messages.push(updatesBlock(name, '1.0.0', '1.1.0', `https://${name}/compare/v1.0.0...v1.1.0`))
     routes = {
       ...routes,
-      ...releasesRoute(`foo/project${index}`, [release('v1.1.0', 'x'.repeat(bodyLength))]),
+      ...releasesRoute(`foo/project${index}`, [
+        release('v1.1.0', 'x'.repeat(bodyLength), {
+          html_url: `https://example.test/project${index}/v1.1.0`,
+        }),
+      ]),
     }
   }
 
@@ -136,7 +140,11 @@ describe('finding updates in commit messages', () => {
   test('keeps different ranges of one package apart', async () => {
     const comment = await postedComment({
       messages: [`${barUpdate('1.0.0', '1.2.0')}\n\n${barUpdate('1.1.0', '1.2.0')}`],
-      routes: noteRoutes,
+      routes: releasesRoute('foo/bar', [
+        release('v1.2.0', 'newer'),
+        release('v1.1.0', 'older'),
+        release('v1.0.0', 'oldest'),
+      ]),
     })
 
     assert.equal(count(comment, '<details>'), 2)
@@ -701,7 +709,7 @@ describe('rendering', () => {
       },
     })
 
-    assert.match(comment, /No release published\. Commits in this range/)
+    assert.match(comment, /Commits in this range/)
     assert.match(comment, /Commit 22]/)
     assert.match(comment, /Commit 3]/)
     assert.doesNotMatch(comment, /Commit 2]/)
@@ -809,7 +817,7 @@ describe('posting', () => {
     const run = await succeed({ ...options, args: ['--dry-run'] })
 
     assert.match(run.stdout, /bar notes/)
-    assert.match(run.stdout, /1 updates, 1 comment\(s\)/)
+    assert.match(run.stdout, /1 update, 1 comment\(s\)/)
     assert.deepEqual(
       run.requests.filter((request) => request.method !== 'GET'),
       [],
@@ -1219,6 +1227,8 @@ describe('paging', () => {
     for (let number = 1; number <= 10; number++) {
       routes[releasesUrl(number)] = ok(page(number * 100))
     }
+
+    routes['GET https://api.github.com/repos/foo/bar/git/matching-refs/tags/v1.'] = ok([])
 
     const run = await succeed({ messages: [barUpdate()], routes })
 

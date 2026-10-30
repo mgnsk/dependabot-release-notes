@@ -13,7 +13,10 @@ inputs:
     default: github-actions[bot]
 
   any-author:
-    description: Run on a pull request that Dependabot did not open
+    description: Run on a pull request that Dependabot did not open, and read commits anyone pushed to one
+    default: "false"
+  only-when-truncated:
+    description: Post only when Dependabot had to truncate the description, and take back earlier comments otherwise
     default: "false"
 
 runs:

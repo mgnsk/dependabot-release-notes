@@ -39,6 +39,12 @@ const COMMIT_LIST_LIMIT = 20
 // How many pages of 100 releases to read from one project, so that a project
 // with thousands of releases cannot spend the token's whole hourly allowance.
 const RELEASE_PAGE_LIMIT = 10
+// How many releases to ask for by tag once those pages did not reach the base.
+const RELEASE_LOOKUP_LIMIT = 20
+// How many major versions to list the tags of on the way back from the new one.
+const TAG_MAJOR_LIMIT = 5
+// A cap for the overview, so that it leaves room in the comment it opens.
+const OVERVIEW_LIMIT = 20_000
 const REQUEST_TIMEOUT = 30_000
 // How many times to ask before a read counts as failed. A write is never
 // repeated, since one that timed out may still have gone through.
@@ -52,9 +58,13 @@ const pullRequest = process.env['INPUT_PULL-REQUEST'] || process.env.PR_NUMBER
 const commentAuthor =
   process.env.INPUT_AUTHOR || process.env.COMMENT_AUTHOR || 'github-actions[bot]'
 const anyAuthor = (process.env['INPUT_ANY-AUTHOR'] || process.env.ANY_AUTHOR) === 'true'
+const onlyWhenTruncated =
+  (process.env['INPUT_ONLY-WHEN-TRUNCATED'] || process.env.ONLY_WHEN_TRUNCATED) === 'true'
 const dryRun = process.argv.includes('--dry-run')
 
 const DEPENDABOT = 'dependabot[bot]'
+// What Dependabot ends a description with when it did not fit.
+const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
 
 async function request(url, init = {}) {
   const method = init.method ?? 'GET'
@@ -137,10 +147,27 @@ function pathRef(ref) {
   return encodeURIComponent(ref).replaceAll('%2F', '/').replaceAll('%40', '@')
 }
 
+function githubRelease(release) {
+  return {
+    tag: release.tag_name,
+    name: release.name,
+    body: release.body,
+    url: release.html_url,
+    date: release.published_at,
+  }
+}
+
+// A file over the contents API's size limit comes without its content.
+function decodeFile(file) {
+  return file?.encoding === 'base64' ? Buffer.from(file.content, 'base64').toString('utf8') : null
+}
+
 // A dependency's notes live on whichever forge hosts it, so each forge answers
-// the same two questions: which releases does it publish, a page at a time and
-// newest first, and which commits lie between two tags. Both shapes are
-// normalised here and nowhere else.
+// the same questions: which releases does it publish, a page at a time and
+// newest first, which commits lie between two tags, and what does a file hold.
+// GitHub also lists tags and finds a release by tag, for a project with more
+// releases than are worth paging through. The shapes are normalised here and
+// nowhere else.
 const FORGES = {
   'github.com': {
     async releases(project, page) {
@@ -151,14 +178,27 @@ const FORGES = {
         done: releases.length < 100,
         releases: releases
           .filter((release) => !release.draft)
-          .map((release) => ({
-            tag: release.tag_name,
-            name: release.name,
-            body: release.body,
-            url: release.html_url,
-            date: release.published_at,
-          })),
+          .map(githubRelease),
       }
+    },
+
+    async release(project, tag) {
+      const release = await api(`/repos/${project}/releases/tags/${pathRef(tag)}`)
+
+      return release && githubRelease(release)
+    },
+
+    // This one answers with every match at once, and would repeat them if paged.
+    async tags(project, stem) {
+      const refs = (await api(`/repos/${project}/git/matching-refs/tags/${pathRef(stem)}`)) ?? []
+
+      return refs.map((ref) => ref.ref.slice('refs/tags/'.length))
+    },
+
+    async file(project, ref, path) {
+      return decodeFile(
+        await api(`/repos/${project}/contents/${pathRef(path)}?ref=${encodeURIComponent(ref)}`),
+      )
     },
 
     async commits(project, base, head) {
@@ -207,6 +247,15 @@ const FORGES = {
 
       return { commits, total: commits.length }
     },
+
+    async file(project, ref, path) {
+      return decodeFile(
+        await request(
+          `https://gitlab.com/api/v4/projects/${encodeURIComponent(project)}/repository/files/` +
+            `${encodeURIComponent(path)}?ref=${encodeURIComponent(ref)}`,
+        ),
+      )
+    },
   },
 }
 
@@ -221,6 +270,11 @@ const UPDATE_FORMS = [
   /^Bumps (?<name>[^\s[\]]+)(?: in `[^`]+`)? from (?<from>\S+) to (?<to>\S+?)(?: in \S+)?\.?$/,
 ]
 
+// Dependabot quotes a commit hash in backticks: from `034a74c` to `a60f53e`.
+function unquoted(text) {
+  return text?.replaceAll('`', '')
+}
+
 function matchUpdate(line) {
   for (const form of UPDATE_FORMS) {
     const update = form.exec(line)
@@ -233,9 +287,11 @@ function matchUpdate(line) {
 }
 
 // Collapse the repeats into one entry per package and version range.
-function parseUpdates(message) {
+function parseUpdates(message, description = '') {
   const lines = message.split('\n')
   const updates = new Map()
+  const headlines = new Set()
+  const detailed = new Set()
 
   for (let index = 0; index < lines.length; index++) {
     const update = matchUpdate(lines[index])
@@ -254,10 +310,19 @@ function parseUpdates(message) {
 
     // The earliest copy wins. The truncation lands in the middle of the last
     // block it kept, so a later copy of the same update may have lost its links.
-    const { name, from, to, project } = update.groups
+    const { name, from, to } = Object.fromEntries(
+      ['name', 'from', 'to'].map((group) => [group, unquoted(update.groups[group])]),
+    )
+    const { project } = update.groups
     const key = `${name}@${from}...${to}`
     if (!updates.has(key)) {
       updates.set(key, { name, from, to, links, project })
+    }
+
+    if (lines[index].startsWith('Updates ')) {
+      detailed.add(`${from}...${to}`)
+    } else if (!project) {
+      headlines.add(key)
     }
   }
 
@@ -270,7 +335,81 @@ function parseUpdates(message) {
     }
   }
 
+  for (const described of parseDescription(description)) {
+    const key = `${described.name}@${described.from}...${described.to}`
+    if (!updates.has(key)) {
+      updates.set(key, described)
+    } else {
+      const update = updates.get(key)
+      update.project ??= described.project
+      update.links.Commits ??= described.links.Commits
+    }
+  }
+
+  // A group's headline names the group rather than a package: "Bumps
+  // `org.springframework` from a to b", above the blocks of the packages in it.
+  for (const key of headlines) {
+    const { from, to, links } = updates.get(key)
+    if (detailed.has(`${from}...${to}`) && Object.keys(links).length === 0) {
+      updates.delete(key)
+    }
+  }
+
+  // The truncation may land inside a version, in the last line it kept, which then
+  // reads as a range of its own next to the whole one a summary table gives.
+  const cut = matchUpdate(lines.findLast((line) => line.trim()) ?? '')
+  if (cut) {
+    const { name, from, to } = cut.groups
+    const whole = [...updates.values()].some(
+      (update) =>
+        update.name === unquoted(name) &&
+        update.from === unquoted(from) &&
+        update.to !== unquoted(to) &&
+        update.to.startsWith(unquoted(to)),
+    )
+    if (whole) {
+      updates.delete(`${unquoted(name)}@${unquoted(from)}...${unquoted(to)}`)
+    }
+  }
+
   return [...updates.values()]
+}
+
+// The commit message of a NuGet update across directories names no versions at
+// all, or only the new one, and the description alone has the ranges:
+//
+//   Updated [Microsoft.ML](https://github.com/dotnet/machinelearning) from 5.0.0 to 5.0.1.
+//
+// Followed by its notes in a <details>, which are the project's own words and
+// are not read, apart from the compare link Dependabot closes them with.
+function parseDescription(description) {
+  const form = /^Updated (?:\[([^\]]+)]\(([^)\s]+)\)|(\S+)) from (\S+) to (\S+?)\.?$/
+  const described = []
+  let depth = 0
+
+  for (const line of description.replace(/\r\n/g, '\n').split('\n')) {
+    const updated = depth === 0 ? form.exec(line) : null
+    if (updated) {
+      const [, linked, project, plain, from, to] = updated
+      described.push({
+        name: linked ?? plain,
+        from: unquoted(from),
+        to: unquoted(to),
+        links: project ? { Repository: project } : {},
+        project,
+      })
+    }
+
+    const compare = /\[compare view]\((\S+\/compare\/\S+?)\)/.exec(line)?.[1]
+    if (compare && described.length > 0) {
+      described.at(-1).links.Commits ??= compare
+    }
+
+    depth += (line.match(/<details\b/gi) ?? []).length - (line.match(/<\/details>/gi) ?? []).length
+    depth = Math.max(depth, 0)
+  }
+
+  return described
 }
 
 // The summary table Dependabot writes before the detail blocks:
@@ -290,7 +429,13 @@ function parseTables(message) {
     }
 
     const [, name, project, from, to] = columns
-    tabled.push({ name, from, to, links: project ? { Repository: project } : {}, project })
+    tabled.push({
+      name: unquoted(name),
+      from,
+      to,
+      links: project ? { Repository: project } : {},
+      project,
+    })
   }
 
   return tabled
@@ -300,7 +445,7 @@ function parseTables(message) {
 // own. A replace directive carries "=>" after the version and never matches, but
 // a line of an exclude block reads the same as a requirement, so the patch is
 // followed from block to block. A hunk names the block it starts in after its "@@".
-const REQUIREMENT = /^([-+])(?:require\s+|\s+)(\S+)\s+(v\S+)(?:\s+\/\/.*)?$/
+const REQUIREMENT = /^([-+])(?:require\s+|\s+)(\S+)\s+(v\S+)(\s+\/\/.*)?$/
 
 // Every requirement whose version a go.mod file in the diff changes. A module
 // the diff only adds or only drops has no range to report.
@@ -325,17 +470,23 @@ function parseRequirementChanges(files) {
 
       const requirement = REQUIREMENT.exec(line)
       if (requirement && block !== 'exclude') {
-        ;(requirement[1] === '-' ? removed : added).set(requirement[2], requirement[3])
+        ;(requirement[1] === '-' ? removed : added).set(requirement[2], {
+          version: requirement[3],
+          indirect: /\/\/\s*indirect\b/.test(requirement[4] ?? ''),
+        })
       }
     }
 
     // Dependabot writes versions without the "v" go.mod gives them, and the
     // ranges have to agree for its links to be found.
-    for (const [name, to] of added) {
-      const from = removed.get(name)
+    for (const [name, { version: to, indirect }] of added) {
+      const from = removed.get(name)?.version
       if (from && from !== to) {
-        const update = { name, from: from.slice(1), to: to.slice(1), links: {} }
-        changes.set(`${name}@${update.from}...${update.to}`, update)
+        const update = { name, from: from.slice(1), to: to.slice(1), links: {}, indirect }
+        const key = `${name}@${update.from}...${update.to}`
+        // A module that one go.mod imports itself is a direct dependency.
+        update.indirect &&= changes.get(key)?.indirect ?? true
+        changes.set(key, update)
       }
     }
   }
@@ -436,6 +587,26 @@ function tagPrefix(name, root) {
   return module.startsWith(`${root}/`) ? `${module.slice(root.length + 1)}/` : ''
 }
 
+// Dependabot picks a monorepo's tags by version alone, and modules that happen to
+// share a version get each other's: the credentials module of the AWS SDK links
+// service/kms/v1.20.9...service/emr/v1.20.10. Go settles what a module's tag is
+// called, wherever the module path spells out the repository.
+function hasForeignTags(update) {
+  const compare = parseCompareLink(update.links.Commits)
+  if (!compare || isCommitHash(compare.base) || isCommitHash(compare.head)) {
+    return false
+  }
+
+  const root = `${compare.host}/${compare.project}`
+  if (update.name !== root && !update.name.startsWith(`${root}/`)) {
+    return false
+  }
+
+  const prefix = tagPrefix(update.name, root)
+
+  return headPrefix(compare.base) !== prefix || headPrefix(compare.head) !== prefix
+}
+
 // The repository a link points into. Dependabot links a package inside a monorepo
 // by its directory (/tree/HEAD/packages/core), and its other links go further in.
 function projectFromLink(url) {
@@ -527,15 +698,20 @@ function packagePrefix(name) {
 }
 
 // What a tag carries ahead of its version: the directory of a module tagged
-// inside a monorepo (service/s3/v1.107.0) or the package of an npm one
-// (@scope/pkg@1.2.3).
+// inside a monorepo (service/s3/v1.107.0), the package of an npm one
+// (@scope/pkg@1.2.3), or a name joined by a dash (foo-v1.3.0, netty-4.1.102.Final).
+// A dash after a version is part of that version instead (v1.2.3-4).
 function headPrefix(head) {
-  return /^.*[/@]/.exec(head)?.[0] ?? ''
+  return /^(?:.*[/@])?(?:(?!v?\d)[^/@]*?-)?(?=v?\d)/.exec(head)?.[0] ?? /^.*[/@]/.exec(head)?.[0] ?? ''
 }
 
 function bareTag(tag, prefix) {
   return tag.slice(prefix.length).replace(/^v/, '')
 }
+
+// A qualifier that marks a final release rather than one on the way to it: Java's
+// 33.0.0-jre and 4.1.100.Final, Spring's 4.3.8.RELEASE, Python's 1.2.3.post1.
+const FINAL_QUALIFIER = /^(?:final|ga|release|jre|android|lts|stable|sp\d*|post\d*)$/i
 
 // Not only semver: an action moves from 4 to 5, and a Python package from 1.2.3.4
 // to 2.0.0rc1. Build metadata says nothing about order, so +incompatible goes.
@@ -544,16 +720,19 @@ function parseVersion(tag, prefix) {
     return null
   }
 
-  const version = /^(\d+(?:\.\d+)*)(?:-?([A-Za-z0-9][\w.-]*))?$/.exec(
+  const version = /^(\d+(?:\.\d+)*)(?:[-.]?([A-Za-z0-9][\w.-]*))?$/.exec(
     bareTag(tag, prefix).replace(/\+.*$/, ''),
   )
   if (!version) {
     return null
   }
 
+  // A post release or service pack comes after the release it follows.
+  const later = /^(?:post|sp)(\d*)$/i.exec(version[2] ?? '')
+
   return {
-    parts: version[1].split('.').map(Number),
-    prerelease: version[2] ?? null,
+    parts: [...version[1].split('.').map(Number), ...(later ? [Number(later[1]) + 1] : [])],
+    prerelease: FINAL_QUALIFIER.test(version[2] ?? '') ? null : (version[2] ?? null),
   }
 }
 
@@ -702,9 +881,13 @@ async function releasesInRange(compare) {
       )
     })
   const releases = await readReleases(compare, reachedBase)
+  const state = releaseCache.get(`${compare.host}/${compare.project}`)
+  const cutShort = !state.done && state.pages >= RELEASE_PAGE_LIMIT
 
-  for (const { prefix, from, to, head } of ranges) {
-    const inRange = selectRange(releases, prefix, from, to, head)
+  for (const range of ranges) {
+    const inRange = cutShort
+      ? await completeRange(compare, releases, range)
+      : selectRange(releases, range.prefix, range.from, range.to, range.head)
     if (inRange.length > 0) {
       return inRange
     }
@@ -715,7 +898,63 @@ async function releasesInRange(compare) {
     : releaseNamingVersion(releases, compare.head, prefix)
 }
 
-// A tag that cannot be ordered (1.2.3.post1, release-1.2.3) can still be found by
+const releaseLookups = new Map()
+
+// One project's release by tag, asked once, for the packages that share it.
+function lookUpRelease(compare, tag) {
+  const key = `${compare.host}/${compare.project}/${tag}`
+  if (!releaseLookups.has(key)) {
+    releaseLookups.set(key, compare.forge.release(compare.project, tag))
+  }
+
+  return releaseLookups.get(key)
+}
+
+// A project may publish more releases than are worth paging through, canaries
+// above all, and the range then lies past the pages read. Its tags name what is
+// missing, newest first, and each of those is asked for by name. What still goes
+// unread is said out loud: compare.incomplete ends up in the section.
+async function completeRange(compare, releases, { prefix, from, to, head }) {
+  const read = selectRange(releases, prefix, from, to, head)
+  if (!compare.forge.tags) {
+    compare.incomplete = true
+
+    return read
+  }
+
+  const stem = head.slice(0, head.length - bareTag(head, prefix).length)
+  const known = new Set(read.map((release) => release.tag))
+
+  try {
+    const missing = []
+    let major = to.parts[0]
+    const lowest = Math.max(from.parts[0], major - TAG_MAJOR_LIMIT + 1)
+    for (; major >= lowest && missing.length <= RELEASE_LOOKUP_LIMIT; major--) {
+      const tags = await compare.forge.tags(compare.project, `${stem}${major}.`)
+      missing.unshift(
+        ...selectRange(tags.map((tag) => ({ tag })), prefix, from, to, head)
+          .map((release) => release.tag)
+          .filter((tag) => !known.has(tag)),
+      )
+    }
+
+    compare.incomplete = missing.length > RELEASE_LOOKUP_LIMIT || major >= from.parts[0]
+
+    const found = await Promise.all(
+      missing.slice(-RELEASE_LOOKUP_LIMIT).map((tag) => lookUpRelease(compare, tag)),
+    )
+
+    return selectRange([...read, ...found.filter(Boolean)], prefix, from, to, head)
+  } catch (error) {
+    console.warn(`${compare.project}: ${error.message}`)
+    recordFailure(error)
+    compare.incomplete = true
+
+    return read
+  }
+}
+
+// A tag that cannot be ordered (release-1.2.3-hotfix_2) can still be found by
 // name, though not the releases on the way to it.
 async function releasesTagged(compare, prefix) {
   const wanted = bareTag(compare.head, prefix)
@@ -741,6 +980,122 @@ function selectRange(releases, prefix, from, to, head) {
     })
     .sort((left, right) => compareVersions(left.version, right.version))
     .map(({ release }) => release)
+}
+
+// Where a link to a changelog file points: /blob/main/packages/kit/CHANGELOG.md.
+function changelogFile(url) {
+  const link = /^https:\/\/(github\.com|gitlab\.com)\/(.+?)\/(?:-\/)?blob\/([^/]+)\/([^?#]+)/.exec(
+    url ?? '',
+  )
+  if (!link || [link[2], link[3], link[4]].some((part) => part.includes('..'))) {
+    return null
+  }
+
+  const [, host, project, ref, path] = link
+
+  return host !== 'github.com' || /^[^/]+\/[^/]+$/.test(project)
+    ? { forge: FORGES[host], project, ref, path: decodeURIComponent(path) }
+    : null
+}
+
+// The version a changelog heading is about: 1.2.3, [1.2.3](link) - date, v1.2.3,
+// Version 1.2.3, or pkg@1.2.3, which in a shared changelog may be another package's.
+function headingVersion(title, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const heading = new RegExp(
+    `^[\\s\\[*_(\`]*([\\w./@-]*@|(?:release|version|ver\\.?|${escaped})\\s+)?` +
+      'v?(\\d+(?:\\.\\d+)+(?:[-.]?[A-Za-z0-9][\\w.-]*)?)',
+    'i',
+  ).exec(title)
+  if (!heading) {
+    return null
+  }
+
+  // Not a version of this package, but it does end the section above it.
+  return heading[1]?.endsWith('@') && heading[1] !== `${name}@` ? '' : heading[2]
+}
+
+// Every version a changelog has a heading for, Markdown or underlined, with what
+// stands below it up to the next version at the same level or a heading above it.
+function changelogSections(text, name) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const headings = []
+  let fence = null
+
+  for (let index = 0; index < lines.length; index++) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[index])?.[1]
+    if (marker && (!fence || marker[0] === fence)) {
+      fence = fence ? null : marker[0]
+    }
+    if (fence || marker) {
+      continue
+    }
+
+    const atx = /^ {0,3}(#{1,6})\s+(.*)$/.exec(lines[index])
+    const underline = /^(=+|-+)\s*$/.exec(lines[index + 1] ?? '')
+    if (atx) {
+      headings.push({
+        index,
+        start: index + 1,
+        level: atx[1].length,
+        version: headingVersion(atx[2], name),
+      })
+    } else if (lines[index].trim() && underline && underline[1].length >= 3) {
+      headings.push({
+        index,
+        start: index + 2,
+        level: underline[1][0] === '=' ? 1 : 2,
+        version: headingVersion(lines[index], name),
+      })
+      index++
+    }
+  }
+
+  return headings
+    .filter((heading) => heading.version)
+    .map((heading) => {
+      const next = headings.find(
+        (other) =>
+          other.index > heading.index &&
+          (other.level < heading.level || (other.version !== null && other.level <= heading.level)),
+      )
+
+      return {
+        version: heading.version,
+        body: lines.slice(heading.start, next?.index ?? lines.length).join('\n').trim(),
+      }
+    })
+}
+
+const changelogs = new Map()
+
+// A project may keep its notes in a file and publish no releases at all. The notes
+// of the versions in the range come out looking like releases, oldest first.
+async function changelogNotes(update) {
+  const file = changelogFile(update.links.Changelog)
+  const from = parseVersion(update.from, '')
+  const to = parseVersion(update.to, '')
+  if (!file || !from || !to) {
+    return []
+  }
+
+  const url = update.links.Changelog
+  if (!changelogs.has(url)) {
+    changelogs.set(url, file.forge.file(file.project, file.ref, file.path))
+  }
+  const text = await changelogs.get(url)
+  if (!text) {
+    return []
+  }
+
+  const sections = new Map(
+    changelogSections(text, update.name)
+      .toReversed()
+      .map(({ version, body }) => [version, body]),
+  )
+  const notes = [...sections].map(([version, body]) => ({ tag: version, name: version, body, url }))
+
+  return selectRange(notes, '', from, to, update.to).filter((note) => note.body)
 }
 
 // A fenced block, closed or running to the end of the text, or an inline span.
@@ -784,6 +1139,25 @@ function stripDisclosures(text) {
   return outsideCode(text, (prose) => prose.replace(/<\/?(?:details|summary)\b[^>]*>/gi, ''))
 }
 
+// Tags GitHub renders that release notes have a use for. Any other is text that
+// reads as a tag, as in "drop <object> and <iframe>", which GitHub may leave open
+// over the other sections in the comment, so it stays text.
+const KNOWN_TAGS = new Set(
+  (
+    'a abbr b blockquote br center code dd del div dl dt em h1 h2 h3 h4 h5 h6 hr i img ins kbd li ' +
+    'ol p picture pre q s samp source span strike strong sub sup table tbody td tfoot th thead tr ' +
+    'tt ul var video'
+  ).split(' '),
+)
+
+function escapeUnknownTags(text) {
+  return outsideCode(text, (prose) =>
+    prose.replace(/<\/?([a-z][\w-]*)(?=[\s/>])[^<>]*>/gi, (tag, name) =>
+      KNOWN_TAGS.has(name.toLowerCase()) ? tag : `&lt;${tag.slice(1)}`,
+    ),
+  )
+}
+
 // A code fence or HTML comment left open swallows everything after it, up to the
 // other sections in the comment.
 function closeOpenMarkup(text) {
@@ -815,8 +1189,8 @@ function closeOpenMarkup(text) {
     : closed
 }
 
-// The HTML blocks a text leaves open, outermost first. An open <pre> or <table>
-// takes the sections after it along, just as a fence does.
+// The HTML a text leaves open, outermost first. An open <pre> or <table> takes the
+// sections after it along, just as a fence does, and an open <b> carries on in them.
 function openHtmlBlocks(text) {
   let prose = ''
   outsideCode(text, (part) => {
@@ -826,7 +1200,8 @@ function openHtmlBlocks(text) {
   })
 
   const open = []
-  const tags = /<(\/?)(pre|table|div|blockquote|ul|ol|dl)\b[^>]*?(\/?)>/gi
+  const tags =
+    /<(\/?)(pre|table|div|blockquote|ul|ol|dl|a|abbr|b|center|code|del|em|h[1-6]|i|ins|kbd|q|s|samp|span|strike|strong|sub|sup|tt|var)\b[^>]*?(\/?)>/gi
   for (const [, closing, tag, selfClosing] of prose.replace(/<!--[\s\S]*?-->/g, '').matchAll(tags)) {
     const name = tag.toLowerCase()
     if (!closing && !selfClosing) {
@@ -859,7 +1234,7 @@ function renderCommits(commits, total) {
   const earlier = total - listed.length
 
   return [
-    '_No release published. Commits in this range:_',
+    '_Commits in this range:_',
     '',
     ...(earlier > 0 ? [`- _… and ${earlier} earlier._`] : []),
     ...listed.map((commit) => `- [${defuseReferences(commit.title)}](${quietLink(commit.url)})`),
@@ -887,11 +1262,15 @@ function commonModulePath(updates) {
   return first.slice(0, length).join('/')
 }
 
+function indirectMark(update) {
+  return update.indirect ? ' (indirect)' : ''
+}
+
 function renderSummary(updates) {
   if (updates.length === 1) {
     const [update] = updates
 
-    return `<code>${update.name}</code> — ${update.from} → ${update.to}`
+    return `<code>${update.name}</code> — ${update.from} → ${update.to}${indirectMark(update)}`
   }
 
   // Packages of one repository need not share a path: react and react-dom.
@@ -925,7 +1304,7 @@ function keepNewest(notes, limit) {
 
 // Several updates share a section when their ranges list the same commits. The
 // first one's links stand for all of them, since every range spans those commits.
-function renderDependency(updates, releases, commits, total) {
+function renderDependency({ updates, releases, commits, total, incomplete, fromChangelog }) {
   const links = Object.entries(updates[0].links)
     .map(([label, url]) => `[${label}](${url})`)
     .join(' · ')
@@ -936,10 +1315,14 @@ function renderDependency(updates, releases, commits, total) {
     : releases.map((release) => {
         const name = release.name?.trim() || release.tag
         const date = release.date?.slice(0, 10)
-        const heading = `**[${name}](${quietLink(release.url)})**${date ? ` — ${date}` : ''}`
+        const title = name.replace(/[[\]]/g, '\\$&')
+        const link = release.url ? `[${title}](${quietLink(release.url)})` : title
+        const heading = `**${link}**${date ? ` — ${date}` : ''}`
         const body = release.body?.trim()
           ? truncate(
-              closeOpenMarkup(stripDisclosures(defuseReferences(release.body.trim()))),
+              closeOpenMarkup(
+                escapeUnknownTags(stripDisclosures(defuseReferences(release.body.trim()))),
+              ),
               RELEASE_BODY_LIMIT,
             )
           : '_No release notes._'
@@ -961,16 +1344,87 @@ function renderDependency(updates, releases, commits, total) {
     '',
     ...(updates.length > 1
       ? [
-          ...updates.map((update) => `- \`${update.name}\` ${update.from} → ${update.to}`),
+          ...updates.map(
+            (update) =>
+              `- \`${update.name}\` ${update.from} → ${update.to}${indirectMark(update)}`,
+          ),
           '',
         ]
       : []),
+    ...(fromChangelog ? ['_From the changelog._', ''] : []),
+    ...(incomplete ? ['_Older releases in this range were not read._', ''] : []),
     keepNewest(notes, DEPENDENCY_LIMIT),
     ...(links ? ['', links] : []),
     '</details>',
   ].join('\n')
 
   return section
+}
+
+// How far an update moves: the first part of the version that changes.
+function bumpKind({ from, to }) {
+  if (isCommitHash(from) || isCommitHash(to)) {
+    return 'commit'
+  }
+
+  const [left, right] = [parseVersion(from, ''), parseVersion(to, '')]
+  if (!left || !right) {
+    return '—'
+  }
+
+  const part = [0, 1, 2].find((index) => (left.parts[index] ?? 0) !== (right.parts[index] ?? 0))
+
+  return ['**major**', 'minor', 'patch'][part] ?? '—'
+}
+
+function shortRef(ref) {
+  return isCommitHash(ref) ? ref.slice(0, 7) : ref
+}
+
+function notesKind({ releases, commits, fromChangelog }) {
+  if (documented(releases)) {
+    return fromChangelog
+      ? 'Changelog'
+      : `${releases.length} ${releases.length === 1 ? 'release' : 'releases'}`
+  }
+
+  return commits.length > 0 ? 'Commits' : 'None'
+}
+
+// A table of everything the update moves, since the notes may run over several
+// comments and each section is folded.
+function renderOverview(entries) {
+  const rows = entries.flatMap((entry) => entry.updates.map((update) => ({ update, entry })))
+  if (rows.length < 2) {
+    return null
+  }
+
+  const scoped = rows.some(({ update }) => update.indirect !== undefined)
+  const lines = [
+    `| Package | Update | Bump |${scoped ? ' Scope |' : ''} Notes |`,
+    `| --- | --- | --- |${scoped ? ' --- |' : ''} --- |`,
+  ]
+
+  let length = 0
+  let shown = 0
+  for (const { update, entry } of rows) {
+    const scope = update.indirect ? 'indirect' : 'direct'
+    const line =
+      `| \`${update.name}\` | \`${shortRef(update.from)}\` → \`${shortRef(update.to)}\` | ` +
+      `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notesKind(entry)} |`
+    if (length + line.length > OVERVIEW_LIMIT) {
+      break
+    }
+
+    lines.push(line)
+    length += line.length + 1
+    shown++
+  }
+
+  return [
+    ...lines,
+    ...(shown < rows.length ? ['', `_… and ${rows.length - shown} more._`] : []),
+  ].join('\n')
 }
 
 function intoComments(sections) {
@@ -1064,9 +1518,10 @@ async function orNothing(update, lookup, nothing = []) {
   }
 }
 
-// The action runs with a write token, and a pull request's commit messages decide
-// what it asks for and quotes, so they have to be Dependabot's.
-async function assertWrittenByDependabot() {
+// The action runs with a write token, and a pull request's commit messages and
+// description decide what it asks for and quotes, so they have to be Dependabot's.
+// A commit pushed on top of Dependabot's has no say, unless any-author is set.
+async function readPullRequest() {
   const path = `/repos/${repository}/pulls/${pullRequest}`
   const pull = await api(path)
   if (!pull) {
@@ -1079,103 +1534,16 @@ async function assertWrittenByDependabot() {
         'Set any-author to run on it anyway.',
     )
   }
+
+  return pull
 }
 
-async function main() {
-  if (!token || !repository || !pullRequest) {
-    console.error('GITHUB_TOKEN, GITHUB_REPOSITORY and PR_NUMBER are required')
-    process.exit(1)
-  }
-
-  await assertWrittenByDependabot()
-
-  const commits = await listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
-  const announced = parseUpdates(commits.map((commit) => commit.commit.message).join('\n'))
-  const files = await listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
-  const requirementChanges = parseRequirementChanges(files)
-
-  const byRange = new Map(
-    announced.map((update) => [`${update.name}@${update.from}...${update.to}`, update]),
-  )
-  const goUpdates = requirementChanges.map(
-    (change) => byRange.get(`${change.name}@${change.from}...${change.to}`) ?? change,
-  )
-
-  // The go.mod changes stand in for the messages only as far as they speak for the
-  // whole diff. A grouped update may move another ecosystem's packages too, and
-  // GitHub leaves the patch out of a file too large to show.
-  const diffIsReadable = files.every(
-    (file) =>
-      /(^|\/)go\.sum$/.test(file.filename) || (/(^|\/)go\.mod$/.test(file.filename) && file.patch),
-  )
-  const goNames = new Set(requirementChanges.map((change) => change.name))
-  const updates =
-    requirementChanges.length > 0
-      ? [
-          ...goUpdates,
-          ...(diffIsReadable ? [] : announced.filter((update) => !goNames.has(update.name))),
-        ]
-      : announced
-
-  // A requirement Dependabot did not announce, or announced only in a summary
-  // table, has no compare link to read the tags from.
-  for (const update of goUpdates.filter((update) => !update.links.Commits)) {
-    const link = rateLimited ? null : await compareLinkFromProxy(update)
-    if (link) {
-      update.links.Commits = link
-    }
-  }
-
-  // The AWS SDK publishes no releases and tags every module it ships on the same
-  // release commit, so a single release moves a dozen modules through the same
-  // commits. List those commits once, under all of the modules they moved.
-  const entries = []
-  const byCommits = new Map()
-  for (const update of updates) {
-    const compare = compareFor(update)
-    const releases = compare ? await orNothing(update, () => releasesInRange(compare)) : []
-    const { commits, total } =
-      compare && !documented(releases)
-        ? await orNothing(update, () => listCommits(compare), { commits: [], total: 0 })
-        : { commits: [], total: 0 }
-
-    const range = commits.length > 0 ? commits.map((commit) => commit.url).join(' ') : null
-    if (range && byCommits.has(range)) {
-      byCommits.get(range).updates.push(update)
-      continue
-    }
-
-    const entry = { updates: [update], releases, commits, total }
-    entries.push(entry)
-    if (range) {
-      byCommits.set(range, entry)
-    }
-  }
-
-  const sections = entries.map((entry) =>
-    renderDependency(entry.updates, entry.releases, entry.commits, entry.total),
-  )
-
-  const comments = intoComments(sections)
-
-  if (updates.length === 0) {
-    console.log('No dependency updates found in the diff or the commit messages, nothing to post.')
-  } else {
-    console.log(
-      `${updates.length} updates, ${comments.length} comment(s): ` +
-        comments.map((comment) => `${comment.length} chars`).join(', '),
-    )
-  }
-
-  if (rateLimited) {
-    console.error('Rate limited: some notes are missing. Run the action again later.')
-  } else if (unavailable) {
-    console.error('Some notes could not be read. Run the action again later.')
-  }
-  if (unavailable) {
-    process.exitCode = 1
-  }
-
+// Every push to the pull request runs this again. Edit the comments already
+// posted rather than replace them, so that they keep their place in the
+// timeline and the replies and reactions they collected. A comment whose notes
+// are unchanged is left alone, and only a part the notes no longer need goes,
+// which is all of them once a push leaves nothing to report.
+async function publish(comments) {
   if (dryRun) {
     if (comments.length > 0) {
       console.log(`\n${comments.join('\n\n========================================\n\n')}`)
@@ -1184,11 +1552,6 @@ async function main() {
     return
   }
 
-  // Every push to the pull request runs this again. Edit the comments already
-  // posted rather than replace them, so that they keep their place in the
-  // timeline and the replies and reactions they collected. A comment whose notes
-  // are unchanged is left alone, and only a part the notes no longer need goes,
-  // which is all of them once a push leaves nothing to report.
   const previous = await previousComments()
 
   // Notes that an outage left out are no reason to take back the ones already up.
@@ -1219,15 +1582,167 @@ async function main() {
   }
 }
 
+async function main() {
+  if (!token || !repository || !pullRequest) {
+    console.error('GITHUB_TOKEN, GITHUB_REPOSITORY and PR_NUMBER are required')
+    process.exit(1)
+  }
+
+  const pull = await readPullRequest()
+
+  if (onlyWhenTruncated && !pull.body?.includes(TRUNCATED_DESCRIPTION)) {
+    console.log('The description holds all of its notes, nothing to post.')
+    await publish([])
+
+    return
+  }
+
+  const commits = await listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
+  const announced = parseUpdates(
+    commits
+      .filter((commit) => anyAuthor || commit.author?.login === DEPENDABOT)
+      .map((commit) => commit.commit.message)
+      .join('\n'),
+    pull.body ?? '',
+  )
+  const files = await listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
+  const requirementChanges = parseRequirementChanges(files)
+
+  const byRange = new Map(
+    announced.map((update) => [`${update.name}@${update.from}...${update.to}`, update]),
+  )
+  const goUpdates = requirementChanges.map((change) => {
+    const update = byRange.get(`${change.name}@${change.from}...${change.to}`)
+
+    return update ? Object.assign(update, { indirect: change.indirect }) : change
+  })
+
+  // The go.mod changes stand in for the messages only as far as they speak for the
+  // whole diff. A grouped update may move another ecosystem's packages too, and
+  // GitHub leaves the patch out of a file too large to show.
+  const diffIsReadable = files.every(
+    (file) =>
+      /(^|\/)go\.sum$/.test(file.filename) || (/(^|\/)go\.mod$/.test(file.filename) && file.patch),
+  )
+  const goNames = new Set(requirementChanges.map((change) => change.name))
+  const updates = (
+    requirementChanges.length > 0
+      ? [
+          ...goUpdates,
+          ...(diffIsReadable ? [] : announced.filter((update) => !goNames.has(update.name))),
+        ]
+      : announced
+  ).toSorted((left, right) => Number(Boolean(left.indirect)) - Number(Boolean(right.indirect)))
+
+  // A requirement Dependabot did not announce, or announced only in a summary
+  // table, has no compare link to read the tags from, and the one it did write
+  // may name another module's. Without the proxy the tags are guessed from the
+  // module path, which beats trusting a link known to be wrong.
+  for (const update of goUpdates) {
+    const foreign = hasForeignTags(update)
+    if (update.links.Commits && !foreign) {
+      continue
+    }
+    if (foreign) {
+      delete update.links.Commits
+    }
+
+    const link = rateLimited ? null : await compareLinkFromProxy(update)
+    if (link) {
+      update.links.Commits = link
+    }
+  }
+
+  // The AWS SDK publishes no releases and tags every module it ships on the same
+  // release commit, so a single release moves a dozen modules through the same
+  // commits. List those commits once, under all of the modules they moved. The
+  // packages of one release, react and react-dom, share a section the same way.
+  const entries = []
+  const bySameNotes = new Map()
+  for (const update of updates) {
+    const compare = compareFor(update)
+    let releases = compare ? await orNothing(update, () => releasesInRange(compare)) : []
+
+    let fromChangelog = false
+    if (!documented(releases)) {
+      const notes = await orNothing(update, () => changelogNotes(update))
+      if (documented(notes)) {
+        releases = notes
+        fromChangelog = true
+      }
+    }
+
+    const { commits, total } =
+      compare && !documented(releases)
+        ? await orNothing(update, () => listCommits(compare), { commits: [], total: 0 })
+        : { commits: [], total: 0 }
+
+    const shown = documented(releases) || commits.length === 0 ? releases : commits
+    const sameNotes =
+      shown.length > 0
+        ? shown.map((note) => `${note.url} ${note.name ?? note.title}`).join('\n')
+        : null
+    if (sameNotes && bySameNotes.has(sameNotes)) {
+      bySameNotes.get(sameNotes).updates.push(update)
+      continue
+    }
+
+    const entry = {
+      updates: [update],
+      releases,
+      commits,
+      total,
+      incomplete: compare?.incomplete,
+      fromChangelog,
+    }
+    entries.push(entry)
+    if (sameNotes) {
+      bySameNotes.set(sameNotes, entry)
+    }
+  }
+
+  const overview = renderOverview(entries)
+  const comments = intoComments([
+    ...(overview ? [overview] : []),
+    ...entries.map(renderDependency),
+  ])
+
+  if (updates.length === 0) {
+    console.log('No dependency updates found in the diff or the commit messages, nothing to post.')
+  } else {
+    console.log(
+      `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}, ` +
+        `${comments.length} comment(s): ` +
+        comments.map((comment) => `${comment.length} chars`).join(', '),
+    )
+  }
+
+  if (rateLimited) {
+    console.error('Rate limited: some notes are missing. Run the action again later.')
+  } else if (unavailable) {
+    console.error('Some notes could not be read. Run the action again later.')
+  }
+  if (unavailable) {
+    process.exitCode = 1
+  }
+
+  await publish(comments)
+}
+
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await main()
 }
 
 export {
+  bumpKind,
+  changelogSections,
   closeOpenMarkup,
   compareFor,
   compareVersions,
   defuseReferences,
+  escapeUnknownTags,
+  hasForeignTags,
+  headPrefix,
   isCommitHash,
   parseRequirementChanges,
   parseUpdates,

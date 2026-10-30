@@ -81,7 +81,7 @@ function defaultRoutes(messages, files, comments) {
 
   paginate(
     `/pulls/${PULL_REQUEST}/commits`,
-    messages.map((message) => ({ commit: { message } })),
+    messages.map((message) => ({ author: { login: 'dependabot[bot]' }, commit: { message } })),
   )
   paginate(`/pulls/${PULL_REQUEST}/files`, files)
   paginate(
