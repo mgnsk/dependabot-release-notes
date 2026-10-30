@@ -125,6 +125,7 @@ export async function runAction({
         FAKE_FETCH_ROUTES: routesFile,
         FAKE_FETCH_LOG: logFile,
         RETRY_DELAY_MS: '0',
+        RATE_LIMIT_WAIT_MS: '0',
         ...env,
       },
     }).then(

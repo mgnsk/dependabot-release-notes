@@ -10,7 +10,7 @@ The action reads the dependencies from the commit messages, the description and 
 
 The action reads what Dependabot writes rather than the files of each language, so it is meant to work with any ecosystem Dependabot updates. Go, npm, Cargo and Composer get more: `go.mod` and the lockfiles `package-lock.json`, `npm-shrinkwrap.json`, `Cargo.lock` and `composer.lock` also reveal what moves transitively, and which updates are direct. Notes come from GitHub and GitLab only.
 
-A transitive package only a lockfile names has no link to its notes, so the overview lists it with its range. Go's module proxy supplies that link, so a Go module gets its notes either way. A package a lockfile only adds or only drops has no range and is left out.
+A transitive package only a lockfile names has no link to its notes, so the overview lists it with its range, in a folded table of its own. A dependency without any notes gets a row in the overview and no section of its own, and when nothing has notes the action posts nothing. Go's module proxy supplies that link, so a Go module gets its notes either way. A package a lockfile only adds or only drops has no range and is left out.
 
 | Ecosystem | What to expect |
 | --- | --- |
@@ -62,7 +62,7 @@ The job runs with a write token, so it must never check out or execute the code 
 
 The action refuses a pull request that Dependabot did not open and ignores the messages of commits anyone else pushed to one, unless `any-author` is set, so that `workflow_dispatch` cannot be pointed at commit messages written by anyone else.
 
-A temporary failure, such as a rate limit or a 5xx that persists through retries, fails the run. Comments from an earlier run are then left as they are; with none to keep, the action posts what it has.
+A rate limit that lifts within a minute is waited out. A temporary failure that persists, such as a longer rate limit or a 5xx through retries, fails the run. Comments from an earlier run are then left as they are; with none to keep, the action posts what it has.
 
 ## Inputs
 

@@ -57,6 +57,9 @@ const REQUEST_TIMEOUT = 30_000
 // repeated, since one that timed out may still have gone through.
 const READ_ATTEMPTS = 3
 const RETRY_DELAY = Number(process.env.RETRY_DELAY_MS ?? 1_000)
+// How long to wait for a rate limit to lift, rather than fail the run. A limit that
+// lifts later than this is left to a later run.
+const RATE_LIMIT_WAIT = Number(process.env.RATE_LIMIT_WAIT_MS ?? 60_000)
 
 // An action reads its inputs from INPUT_*, and a local run from the names below.
 const token = process.env.INPUT_TOKEN || process.env.GITHUB_TOKEN
@@ -70,6 +73,14 @@ const onlyWhenTruncated =
 const dryRun = process.argv.includes('--dry-run')
 
 const DEPENDABOT = 'dependabot[bot]'
+
+// On a runner a warning becomes an annotation of the run, which someone may see. A
+// message may quote an answer from elsewhere, and must not run a workflow command.
+function warn(message) {
+  const annotation = message.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+
+  console.warn(process.env.GITHUB_ACTIONS === 'true' ? `::warning::${annotation}` : message)
+}
 // What Dependabot ends a description with when it did not fit.
 const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
 
@@ -92,6 +103,12 @@ async function request(url, init = {}) {
 
     if (response.status >= 500 && attempt < attempts) {
       await pause(attempt)
+      continue
+    }
+
+    const wait = rateLimitWait(response)
+    if (wait !== null && wait <= RATE_LIMIT_WAIT && attempt < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, wait))
       continue
     }
 
@@ -119,6 +136,26 @@ async function request(url, init = {}) {
 
     return init.raw ? response.text() : response.json()
   }
+}
+
+// How long a rate limited answer asks to wait, if it says. GitHub's secondary limit
+// gives the seconds and its primary one the moment the allowance comes back.
+function rateLimitWait(response) {
+  if (response.status !== 429 && response.status !== 403) {
+    return null
+  }
+
+  const retryAfter = response.headers.get('retry-after')
+  if (retryAfter !== null && /^\d+$/.test(retryAfter)) {
+    return Number(retryAfter) * 1_000
+  }
+
+  const reset = response.headers.get('x-ratelimit-reset')
+  if (response.headers.get('x-ratelimit-remaining') === '0' && /^\d+$/.test(reset ?? '')) {
+    return Math.max(Number(reset) * 1_000 - Date.now(), 0)
+  }
+
+  return null
 }
 
 function pause(attempt) {
@@ -303,6 +340,7 @@ function parseUpdates(message, description = '') {
   const updates = new Map()
   const headlines = new Set()
   const detailed = new Set()
+  const blocks = new Set()
 
   for (let index = 0; index < lines.length; index++) {
     const update = matchUpdate(lines[index])
@@ -332,6 +370,7 @@ function parseUpdates(message, description = '') {
 
     if (lines[index].startsWith('Updates ')) {
       detailed.add(`${from}...${to}`)
+      blocks.add(name)
     } else if (!project) {
       headlines.add(key)
     }
@@ -358,10 +397,11 @@ function parseUpdates(message, description = '') {
   }
 
   // A group's headline names the group rather than a package: "Bumps
-  // `org.springframework` from a to b", above the blocks of the packages in it.
+  // `org.springframework` from a to b", above the blocks of the packages in it. A
+  // package's own headline stands above a block of the same name, and stays.
   for (const key of headlines) {
-    const { from, to, links } = updates.get(key)
-    if (detailed.has(`${from}...${to}`) && Object.keys(links).length === 0) {
+    const { name, from, to, links } = updates.get(key)
+    if (!blocks.has(name) && detailed.has(`${from}...${to}`) && Object.keys(links).length === 0) {
       updates.delete(key)
     }
   }
@@ -655,7 +695,7 @@ async function readLockfileChanges(files, commits) {
   }
 
   if (paths.length > LOCKFILE_LIMIT) {
-    console.warn(`Reading ${LOCKFILE_LIMIT} of ${paths.length} lockfiles.`)
+    warn(`Reading ${LOCKFILE_LIMIT} of ${paths.length} lockfiles.`)
   }
 
   const changes = new Map()
@@ -686,7 +726,7 @@ async function readLockfileChanges(files, commits) {
         changes.set(key, change)
       }
     } catch (error) {
-      console.warn(`${path}: ${error.message}`)
+      warn(`${path}: ${error.message}`)
       recordFailure(error)
     }
   }
@@ -752,7 +792,7 @@ async function proxyOrigin(name, version) {
 
     return info?.Origin ?? null
   } catch (error) {
-    console.warn(`${name}@${version}: ${error.message}`)
+    warn(`${name}@${version}: ${error.message}`)
     recordFailure(error)
 
     return null
@@ -1171,7 +1211,7 @@ async function completeRange(compare, releases, { prefix, from, to, head }) {
 
     return selectRange([...read, ...found.filter(Boolean)], prefix, from, to, head)
   } catch (error) {
-    console.warn(`${compare.project}: ${error.message}`)
+    warn(`${compare.project}: ${error.message}`)
     recordFailure(error)
     compare.incomplete = true
 
@@ -1556,11 +1596,7 @@ function renderDependency({ updates, releases, commits, total, incomplete, fromC
       })
 
   if (notes.length === 0) {
-    notes.push(
-      commits.length > 0
-        ? renderCommits(commits, total)
-        : '_No release notes available for this package._',
-    )
+    notes.push(renderCommits(commits, total))
   }
 
   const section = [
@@ -1616,44 +1652,75 @@ function notesKind({ releases, commits, fromChangelog }) {
   return commits.length > 0 ? 'Commits' : 'None'
 }
 
+// A dependency without notes has no section, which leaves its links to the table.
+function hasNotes({ releases, commits }) {
+  return releases.length > 0 || commits.length > 0
+}
+
+function notesCell(entry) {
+  const links = Object.entries(entry.updates[0].links).map(([label, url]) => `[${label}](${url})`)
+
+  return [notesKind(entry), ...(hasNotes(entry) ? [] : links)].join(' · ')
+}
+
 // A table of everything the update moves, since the notes may run over several
-// comments and each section is folded.
+// comments and each section is folded. The packages only a lockfile names can run
+// to hundreds, so they are folded too, under the ones Dependabot set out to move.
 function renderOverview(entries, listed = []) {
-  const rows = [
-    ...entries.flatMap((entry) => entry.updates.map((update) => ({ update, notes: notesKind(entry) }))),
-    ...listed.map((update) => ({ update, notes: 'Not read' })),
-  ]
-  if (rows.length < 2 && !(listed.length > 0 && entries.length === 0)) {
+  const main = entries.flatMap((entry) =>
+    entry.updates.map((update) => ({ update, notes: notesCell(entry) })),
+  )
+  const others = listed.map((update) => ({ update, notes: 'Not read' }))
+  if (main.length + others.length < 2) {
     return null
   }
 
-  const scoped = rows.some(({ update }) => update.indirect !== undefined)
-  const lines = [
-    `| Package | Update | Bump |${scoped ? ' Scope |' : ''} Notes |`,
-    `| --- | --- | --- |${scoped ? ' --- |' : ''} --- |`,
-  ]
+  const scoped = [...main, ...others].some(({ update }) => update.indirect !== undefined)
+  let left = OVERVIEW_LIMIT
 
-  let length = 0
-  let shown = 0
-  for (const { update, notes } of rows) {
-    // A lockfile from before npm 7 does not say, and neither does an ecosystem without one.
-    const scope = update.indirect === undefined ? '—' : update.indirect ? 'indirect' : 'direct'
-    const line =
-      `| \`${update.name}\` | \`${shortRef(update.from)}\` → \`${shortRef(update.to)}\` | ` +
-      `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notes} |`
-    if (length + line.length > OVERVIEW_LIMIT) {
-      break
+  const table = (rows) => {
+    const lines = [
+      `| Package | Update | Bump |${scoped ? ' Scope |' : ''} Notes |`,
+      `| --- | --- | --- |${scoped ? ' --- |' : ''} --- |`,
+    ]
+
+    let shown = 0
+    for (const { update, notes } of rows) {
+      // A lockfile from before npm 7 does not say, and neither does an ecosystem without one.
+      const scope = update.indirect === undefined ? '—' : update.indirect ? 'indirect' : 'direct'
+      const line =
+        `| \`${update.name}\` | \`${shortRef(update.from)}\` → \`${shortRef(update.to)}\` | ` +
+        `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notes} |`
+      if (line.length >= left) {
+        break
+      }
+
+      lines.push(line)
+      left -= line.length + 1
+      shown++
     }
 
-    lines.push(line)
-    length += line.length + 1
-    shown++
+    return [
+      ...lines,
+      ...(shown < rows.length ? ['', `_… and ${rows.length - shown} more._`] : []),
+    ].join('\n')
   }
 
   return [
-    ...lines,
-    ...(shown < rows.length ? ['', `_… and ${rows.length - shown} more._`] : []),
-  ].join('\n')
+    ...(main.length > 0 ? [table(main)] : []),
+    ...(others.length > 0
+      ? [
+          [
+            '<details>',
+            `<summary>${others.length} more ${others.length === 1 ? 'package' : 'packages'} from the lockfiles</summary>`,
+            '',
+            table(others),
+            '',
+            '</details>',
+          ].join('\n'),
+        ]
+      : []),
+  ].join('\n\n')
 }
 
 function intoComments(sections) {
@@ -1740,7 +1807,7 @@ async function orNothing(update, lookup, nothing = []) {
   try {
     return await lookup()
   } catch (error) {
-    console.warn(`${update.name}: ${error.message}`)
+    warn(`${update.name}: ${error.message}`)
     recordFailure(error)
 
     return nothing
@@ -1929,14 +1996,23 @@ async function main() {
     }
   }
 
-  const overview = renderOverview(entries, listed)
+  // With no notes for anything there is nothing to add to what Dependabot wrote.
+  const withNotes = entries.filter(hasNotes)
+  const overview = withNotes.length > 0 ? renderOverview(entries, listed) : null
   const comments = intoComments([
     ...(overview ? [overview] : []),
-    ...entries.map(renderDependency),
+    ...withNotes.map(renderDependency),
   ])
 
-  if (comments.length === 0) {
-    console.log('No dependency updates found in the diff or the commit messages, nothing to post.')
+  if (updates.length === 0 && listed.length === 0) {
+    const nothing = 'No dependency updates found in the diff or the commit messages, nothing to post.'
+    console.log(nothing)
+    if (files.length > 0) {
+      warn(`${nothing} The pull request changes ${files.length} file(s), so its format may be unknown.`)
+    }
+  } else if (comments.length === 0) {
+    const moved = [...updates, ...listed].map(({ name, from, to }) => `${name} ${from} → ${to}`)
+    console.log(`No notes found, nothing to post. Updates: ${moved.join(', ')}`)
   } else {
     console.log(
       `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}, ` +

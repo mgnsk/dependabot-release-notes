@@ -72,6 +72,15 @@ async function postedComment(options) {
   return run.posted[0]
 }
 
+// The log of a run that found no notes for anything, and so posted nothing.
+async function withoutNotes(options) {
+  const run = await succeed(options)
+  assert.deepEqual(run.posted, [])
+  assert.match(run.stdout, /No notes found, nothing to post/)
+
+  return run.stdout
+}
+
 function count(text, needle) {
   return text.split(needle).length - 1
 }
@@ -157,10 +166,9 @@ describe('finding updates in commit messages', () => {
     ['a plain Bumps with a directory', 'Bumps foo from 1.0.0 to 1.2.0 in /sub'],
   ]) {
     test(`parses ${form}`, async () => {
-      const comment = await postedComment({ messages: [message] })
+      const log = await withoutNotes({ messages: [message] })
 
-      assert.match(comment, /<code>foo<\/code> — 1\.0\.0 → 1\.2\.0/)
-      assert.match(comment, /No release notes available/)
+      assert.match(log, /foo 1\.0\.0 → 1\.2\.0/)
     })
   }
 
@@ -175,9 +183,9 @@ describe('finding updates in commit messages', () => {
   })
 
   test('accepts a summary table row without a project', async () => {
-    const comment = await postedComment({ messages: ['| foo | `1.0.0` | `1.2.0` |'] })
+    const log = await withoutNotes({ messages: ['| foo | `1.0.0` | `1.2.0` |'] })
 
-    assert.match(comment, /<code>foo<\/code> — 1\.0\.0 → 1\.2\.0/)
+    assert.match(log, /foo 1\.0\.0 → 1\.2\.0/)
   })
 
   test('prefers a detail block over the table row of the same update', async () => {
@@ -216,12 +224,12 @@ describe('finding updates in go.mod', () => {
     })
 
     assert.match(comment, /bar notes/)
-    assert.match(comment, /<code>example\.test\/indirect<\/code> — 0\.1\.0 → 0\.2\.0/)
+    assert.match(comment, /\| `example\.test\/indirect` \| `0\.1\.0` → `0\.2\.0` \|/)
     assert.doesNotMatch(comment, /only\/announced/)
   })
 
   test('reads require lines and go.mod files in subdirectories', async () => {
-    const comment = await postedComment({
+    const log = await withoutNotes({
       files: [
         {
           filename: 'tools/go.mod',
@@ -234,7 +242,7 @@ describe('finding updates in go.mod', () => {
       },
     })
 
-    assert.match(comment, /<code>example\.test\/single<\/code> — 1\.0\.0 → 1\.1\.0/)
+    assert.match(log, /example\.test\/single 1\.0\.0 → 1\.1\.0/)
   })
 
   test('ignores what has no range to report', async () => {
@@ -264,7 +272,7 @@ describe('finding updates in go.mod', () => {
 
   test('reads the files past the first page', async () => {
     const filler = Array.from({ length: 100 }, (_, index) => ({ filename: `file${index}.txt` }))
-    const run = await succeed({
+    const log = await withoutNotes({
       files: [...filler, goModFile([['example.test/late', 'v1.0.0', 'v1.1.0']])],
       routes: {
         ...missing('example.test/late', 'v1.0.0'),
@@ -272,7 +280,7 @@ describe('finding updates in go.mod', () => {
       },
     })
 
-    assert.match(run.posted[0], /example\.test\/late/)
+    assert.match(log, /example\.test\/late/)
   })
 })
 
@@ -357,15 +365,13 @@ describe('Go module proxy', () => {
   })
 
   test('does not compare across repositories', async () => {
-    const comment = await postedComment({
+    await withoutNotes({
       files: [goModFile([['example.test/moved', 'v1.0.0', 'v1.1.0']])],
       routes: {
         ...proxyRoute('example.test/moved', 'v1.0.0', tagged('v1.0.0', 'https://github.com/old/home')),
         ...proxyRoute('example.test/moved', 'v1.1.0', tagged('v1.1.0', 'https://github.com/new/home')),
       },
     })
-
-    assert.match(comment, /No release notes available/)
   })
 
   test('warns and carries on when the proxy fails', async () => {
@@ -380,7 +386,7 @@ describe('Go module proxy', () => {
 
     assert.equal(run.code, 1)
     assert.match(run.stderr, /example\.test\/flaky@v1\.0\.0/)
-    assert.match(run.posted[0], /No release notes available/)
+    assert.deepEqual(run.posted, [])
   })
 })
 
@@ -441,7 +447,7 @@ describe('finding the notes', () => {
   }
 
   test('finds no release when a prerelease moves backwards', async () => {
-    const comment = await postedComment({
+    const log = await withoutNotes({
       messages: [barUpdate('1.2.0-rc.10', '1.2.0-rc.9')],
       routes: {
         ...releasesRoute('foo/bar', [release('v1.2.0-rc.9', 'candidate notes')]),
@@ -449,7 +455,7 @@ describe('finding the notes', () => {
       },
     })
 
-    assert.doesNotMatch(comment, /candidate notes/)
+    assert.doesNotMatch(log, /candidate notes/)
   })
 
   test('keeps the releases of the same path on two forges apart', async () => {
@@ -528,15 +534,13 @@ describe('finding the notes', () => {
   })
 
   test('tolerates a project that is gone', async () => {
-    const comment = await postedComment({
+    await withoutNotes({
       messages: [barUpdate()],
       routes: {
         'GET https://api.github.com/repos/foo/bar/releases?per_page=100&page=1': notFound,
         'GET https://api.github.com/repos/foo/bar/compare/v1.0.0...v1.2.0': notFound,
       },
     })
-
-    assert.match(comment, /No release notes available/)
   })
 
   describe('on GitLab', () => {
@@ -940,13 +944,13 @@ describe('updates outside go.mod', () => {
   })
 
   test('does not report a module twice when the message has another range', async () => {
-    const comment = await postedComment({
+    const comment = await withoutNotes({
       messages: [updatesBlock('example.test/go', '1.0.0', '1.0.5', 'https://github.com/foo/go/compare/v1.0.0...v1.0.5')],
       files: [goChange, { filename: 'package.json', patch: '-a\n+b' }],
       routes: goMissing,
     })
 
-    assert.equal(count(comment, '<details>'), 1)
+    assert.equal(count(comment, 'example.test/go '), 1)
     assert.match(comment, /1\.0\.0 → 1\.1\.0/)
   })
 })
@@ -968,7 +972,7 @@ describe('a dependency that fails', () => {
     })
 
     assert.match(run.posted[0], /ok notes/)
-    assert.match(run.posted[0], /No release notes available/)
+    assert.match(run.posted[0], /\| `github\.com\/foo\/bar` .*\| None/)
     assert.match(run.stderr, /github\.com\/foo\/bar: GET .*403/)
   })
 
@@ -1519,11 +1523,11 @@ describe('temporary failures', () => {
     assert.deepEqual(run.deleted, [])
   })
 
-  test('post what there is when there is nothing to keep, and exit 1', async () => {
+  test('post nothing when no notes could be read, and exit 1', async () => {
     const run = await runAction({ messages: [barUpdate()], routes: down })
 
     assert.equal(run.code, 1)
-    assert.equal(run.posted.length, 1)
+    assert.deepEqual(run.posted, [])
   })
 
   test('stop the lookups once rate limited', async () => {

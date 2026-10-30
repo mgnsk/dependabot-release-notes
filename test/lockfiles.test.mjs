@@ -214,8 +214,9 @@ describe('a pull request with a lockfile', () => {
     const [posted] = run.posted
     assert.match(posted, /\| `a` \| `1\.0\.0` → `1\.1\.0` \| minor \| direct \| 1 release \|/)
     assert.match(posted, /\| `b` \| `2\.0\.0` → `2\.1\.0` \| minor \| indirect \| Not read \|/)
-    assert.equal(posted.split('<details>').length - 1, 1)
-    assert.match(run.stdout + run.posted.length, /./)
+    assert.ok(posted.indexOf('`a`') < posted.indexOf('<summary>1 more package from the lockfiles</summary>'))
+    assert.ok(posted.indexOf('<summary>1 more package') < posted.indexOf('`b`'))
+    assert.equal(posted.split('<summary>').length - 1, 2)
   })
 
   test('asks for the file as it is', async () => {
@@ -331,7 +332,7 @@ describe('a pull request with a lockfile', () => {
     assert.ok(!run.requests.some((request) => request.url.includes('/contents/')))
   })
 
-  test('posts the list alone when nothing else names the packages', async () => {
+  test('posts nothing when only a lockfile names the packages', async () => {
     const run = await runAction({
       files,
       routes: {
@@ -341,7 +342,7 @@ describe('a pull request with a lockfile', () => {
       },
     })
 
-    assert.equal(run.posted.length, 1)
-    assert.match(run.posted[0], /\| `b` \|/)
+    assert.deepEqual(run.posted, [])
+    assert.match(run.stdout, /No notes found, nothing to post\. Updates: b 2\.0\.0 → 2\.1\.0/)
   })
 })

@@ -540,3 +540,94 @@ describe('commits pushed on top', () => {
     assert.equal(run.posted.length, 1)
   })
 })
+
+describe('a headline above a block of the same name', () => {
+  const message = 'Bumps gradle in `/gradle` from 9.7.1 to 9.8.1.\n\nUpdates `gradle` from 9.7.1 to 9.8.1\n\n---\n'
+
+  test('stays', () => {
+    assert.deepEqual(parseUpdates(message).map((update) => update.name), ['gradle'])
+  })
+
+  test('is reported as an update without notes, and without a warning', async () => {
+    const run = await runAction({ messages: [message], files: [{ filename: 'gradle/Dockerfile' }] })
+
+    assert.match(run.stdout, /gradle 9\.7\.1 → 9\.8\.1/)
+    assert.doesNotMatch(run.stderr, /format may be unknown/)
+  })
+})
+
+describe('rate limits', () => {
+  const message = 'Updates `a` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/a/compare/v1.0.0...v1.1.0)'
+  const releases = 'GET https://api.github.com/repos/o/a/releases?per_page=100&page=1'
+  const limited = (headers) => ({ status: 429, headers, body: { message: 'slow down' } })
+  const asked = async (headers) => {
+    const run = await runAction({ messages: [message], routes: { [releases]: limited(headers) } })
+
+    return run.requests.filter((request) => request.url.includes('/o/a/releases')).length
+  }
+
+  test('that lift in time are waited out', async () => {
+    assert.equal(await asked({ 'retry-after': '0' }), 3)
+  })
+
+  test('that lift too late are not', async () => {
+    assert.equal(await asked({ 'retry-after': '3600' }), 1)
+    assert.equal(
+      await asked({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': `${Math.floor(Date.now() / 1000) + 3600}` }),
+      1,
+    )
+  })
+})
+
+describe('warnings', () => {
+  const message = 'Updates `a` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/a/compare/v1.0.0...v1.1.0)'
+  const routes = {
+    'GET https://api.github.com/repos/o/a/releases?per_page=100&page=1': {
+      status: 403,
+      text: 'no\n::error::100%',
+    },
+    'GET https://api.github.com/repos/o/a/compare/v1.0.0...v1.1.0': notFound,
+  }
+
+  test('become annotations on a runner, and cannot run a workflow command', async () => {
+    const run = await runAction({ messages: [message], routes, env: { GITHUB_ACTIONS: 'true' } })
+
+    assert.match(run.stderr, /^::warning::a: GET .*no%0A::error::100%25$/m)
+    assert.doesNotMatch(run.stderr, /^::error::/m)
+  })
+
+  test('stay plain elsewhere', async () => {
+    const run = await runAction({ messages: [message], routes })
+
+    assert.doesNotMatch(run.stderr, /::warning::/)
+  })
+
+  test('speak up when a pull request changes files but names no update', async () => {
+    const run = await runAction({ messages: ['Something new'], files: [{ filename: 'x.lock' }] })
+
+    assert.equal(run.code, 0)
+    assert.match(run.stderr, /changes 1 file\(s\), so its format may be unknown/)
+  })
+})
+
+describe('dependencies without notes', () => {
+  const notes = 'Updates `a` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/a/compare/v1.0.0...v1.1.0)'
+  const empty = 'Updates `b` from 1.0.0 to 1.1.0\n- [Changelog](https://example.test/changes)'
+  const routes = releasesRoute('o/a', [release('v1.1.0', 'a notes'), release('v1.0.0', 'old')])
+
+  test('get a row with their links and no section', async () => {
+    const posted = await comment({ messages: [`${notes}\n\n${empty}`], routes })
+
+    assert.match(posted, /\| `b` .*\| None · \[Changelog]\(https:\/\/example\.test\/changes\) \|/)
+    assert.equal(count(posted, '<details>'), 1)
+    assert.doesNotMatch(posted, /<code>b<\/code>/)
+  })
+
+  test('alone leave nothing to post, and take back what was posted', async () => {
+    const run = await runAction({ messages: [empty], comments: [{ id: 4, body: `${MARKER}\nOld` }] })
+
+    assert.deepEqual(run.posted, [])
+    assert.deepEqual(run.deleted, [4])
+    assert.match(run.stdout, /No notes found, nothing to post\. Updates: b 1\.0\.0 → 1\.1\.0/)
+  })
+})
