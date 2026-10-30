@@ -26,7 +26,8 @@ globalThis.fetch = async (url, init = {}) => {
     })}\n`,
   )
 
-  return new Response(route.status === 204 ? null : JSON.stringify(route.body), {
+  // A route with text answers with a file as it is, rather than with JSON.
+  return new Response(route.status === 204 ? null : (route.text ?? JSON.stringify(route.body)), {
     status: route.status,
     headers: route.headers,
   })

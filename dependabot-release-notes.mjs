@@ -19,6 +19,11 @@
 // ones a go mod tidy pushed on top of the bump. The messages then only supply
 // the links Dependabot wrote, and the module proxy supplies the rest.
 //
+// An npm, Cargo or Composer lockfile holds the same account of what moved, the
+// transitive packages included, but GitHub leaves the patch out of a large one, so
+// the file itself is compared between the two ends of the branch. A package only
+// the lockfile names has no link to any notes, and is listed in the overview.
+//
 // Usage: GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo PR_NUMBER=123 \
 //          node dependabot-release-notes.mjs [--dry-run]
 
@@ -45,6 +50,8 @@ const RELEASE_LOOKUP_LIMIT = 20
 const TAG_MAJOR_LIMIT = 5
 // A cap for the overview, so that it leaves room in the comment it opens.
 const OVERVIEW_LIMIT = 20_000
+// How many lockfiles to read, at two requests each, in an update across directories.
+const LOCKFILE_LIMIT = 20
 const REQUEST_TIMEOUT = 30_000
 // How many times to ask before a read counts as failed. A write is never
 // repeated, since one that timed out may still have gone through.
@@ -106,7 +113,11 @@ async function request(url, init = {}) {
       throw error
     }
 
-    return response.status === 204 ? null : response.json()
+    if (response.status === 204) {
+      return null
+    }
+
+    return init.raw ? response.text() : response.json()
   }
 }
 
@@ -492,6 +503,220 @@ function parseRequirementChanges(files) {
   }
 
   return [...changes.values()]
+}
+
+// Each parser gives the versions of the packages a lockfile installs, by name, and
+// the names the project itself asks for, or null when the lockfile does not say.
+function addVersion(versions, name, version) {
+  if (name && version) {
+    versions.set(name, (versions.get(name) ?? new Set()).add(version))
+  }
+}
+
+// A package may be installed at several paths, in several versions, and an alias is
+// installed under another name than its own. An entry without node_modules in its
+// path is the project or a workspace of it, which is where the direct names are. A
+// lockfile from before npm 7 nests its packages instead, and names no direct ones.
+function parsePackageLock(text) {
+  const lock = JSON.parse(text)
+  const versions = new Map()
+
+  if (!lock.packages) {
+    const walk = (dependencies = {}) => {
+      for (const [name, entry] of Object.entries(dependencies)) {
+        addVersion(versions, entry.name ?? name, entry.version)
+        walk(entry.dependencies)
+      }
+    }
+    walk(lock.dependencies)
+
+    return { versions, direct: null }
+  }
+
+  const direct = new Set()
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    const installed = path.lastIndexOf('node_modules/')
+    if (installed === -1) {
+      for (const group of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+        Object.keys(entry[group] ?? {}).forEach((name) => direct.add(name))
+      }
+    } else if (!entry.link) {
+      addVersion(versions, entry.name ?? path.slice(installed + 'node_modules/'.length), entry.version)
+    }
+  }
+
+  return { versions, direct }
+}
+
+// A package without a source is a crate of the workspace, and what those depend on
+// is direct. A dependency reads "name", "name 1.2.3" or "name 1.2.3 (source)".
+function parseCargoLock(text) {
+  const versions = new Map()
+  const direct = new Set()
+
+  for (const block of text.replace(/\r\n/g, '\n').split(/^\[/m)) {
+    if (!block.startsWith('[package]]')) {
+      continue
+    }
+
+    const field = (name) => new RegExp(`^${name} = "(.*)"$`, 'm').exec(block)?.[1]
+    if (field('source')) {
+      addVersion(versions, field('name'), field('version'))
+    } else {
+      const dependencies = /^dependencies = \[([^\]]*)]/m.exec(block)?.[1] ?? ''
+      for (const [, name] of dependencies.matchAll(/"([^"\s]+)[^"]*"/g)) {
+        direct.add(name)
+      }
+    }
+  }
+
+  return { versions, direct }
+}
+
+// The lockfile does not say what the project asks for, but the composer.json beside
+// it does. It also gives each package's repository, for one nothing else links.
+function parseComposerLock(text, manifest) {
+  const lock = JSON.parse(text)
+  const versions = new Map()
+  const projects = new Map()
+
+  for (const entry of [...(lock.packages ?? []), ...(lock['packages-dev'] ?? [])]) {
+    addVersion(versions, entry.name, entry.version?.replace(/^v(?=\d)/, ''))
+    if (entry.source?.url) {
+      projects.set(entry.name, entry.source.url)
+    }
+  }
+
+  const required = manifest ? JSON.parse(manifest) : null
+  const direct = required
+    ? new Set([...Object.keys(required.require ?? {}), ...Object.keys(required['require-dev'] ?? {})])
+    : null
+
+  return { versions, direct, projects }
+}
+
+const LOCKFILES = {
+  'package-lock.json': { parse: parsePackageLock },
+  'npm-shrinkwrap.json': { parse: parsePackageLock },
+  'Cargo.lock': { parse: parseCargoLock },
+  'composer.lock': { parse: parseComposerLock, manifest: 'composer.json' },
+}
+
+// What moved between two readings of a lockfile. A package may hold several versions
+// at once, and moves between paths without changing, so only versions that came or
+// went count, paired from the highest down. A package only added or only dropped has
+// no range to report. Lockfiles go in a table, and must not be able to break out of it.
+function diffLockfile(before, after) {
+  const changes = []
+  const order = (left, right) => left.localeCompare(right, 'en', { numeric: true })
+
+  for (const [name, versions] of after.versions) {
+    const old = before.versions.get(name) ?? new Set()
+    const added = [...versions].filter((version) => !old.has(version)).sort(order)
+    const removed = [...old].filter((version) => !versions.has(version)).sort(order)
+
+    for (let index = 1; index <= Math.min(added.length, removed.length); index++) {
+      const [from, to] = [removed.at(-index), added.at(-index)]
+      if (/^[\w@./-]+$/.test(name) && /^[\w.+-]+$/.test(from) && /^[\w.+-]+$/.test(to)) {
+        changes.push({
+          name,
+          from,
+          to,
+          links: {},
+          project: after.projects?.get(name),
+          indirect: after.direct ? !after.direct.has(name) : undefined,
+        })
+      }
+    }
+  }
+
+  return changes
+}
+
+// A file of the repository at a commit, up to the 100 MB GitHub serves, where the
+// contents API's JSON answer stops at 1 MB.
+function repositoryFile(path, sha) {
+  return api(`/repos/${repository}/contents/${pathRef(path)}?ref=${sha}`, {
+    raw: true,
+    headers: { accept: 'application/vnd.github.raw+json' },
+  })
+}
+
+// Every package the lockfiles in the diff move. The ends of the branch are its own
+// commits: the base branch may have moved on since, and a commit anyone else pushed
+// has no more say here than its message has.
+async function readLockfileChanges(files, commits) {
+  const [base, head] = [commits[0]?.parents?.[0]?.sha, commits.at(-1)?.sha]
+  const paths = files
+    .filter((file) => file.status === 'modified' && LOCKFILES[file.filename.split('/').at(-1)])
+    .map((file) => file.filename)
+  if (!base || !head) {
+    return []
+  }
+
+  if (paths.length > LOCKFILE_LIMIT) {
+    console.warn(`Reading ${LOCKFILE_LIMIT} of ${paths.length} lockfiles.`)
+  }
+
+  const changes = new Map()
+  for (const path of paths.slice(0, LOCKFILE_LIMIT)) {
+    try {
+      const { parse, manifest } = LOCKFILES[path.split('/').at(-1)]
+      const beside = manifest && path.replace(/[^/]+$/, manifest)
+      const read = async (sha) => {
+        const [text, manifestText] = await Promise.all([
+          repositoryFile(path, sha),
+          beside ? repositoryFile(beside, sha) : null,
+        ])
+
+        return text === null ? null : parse(text, manifestText)
+      }
+      const [before, after] = [await read(base), await read(head)]
+      if (!before || !after) {
+        continue
+      }
+
+      for (const change of diffLockfile(before, after)) {
+        const key = `${change.name}@${change.from}...${change.to}`
+        const seen = changes.get(key)
+        // A package that one directory asks for itself is a direct dependency.
+        if (seen) {
+          change.indirect = seen.indirect === false ? false : (change.indirect ?? seen.indirect)
+        }
+        changes.set(key, change)
+      }
+    } catch (error) {
+      console.warn(`${path}: ${error.message}`)
+      recordFailure(error)
+    }
+  }
+
+  return [...changes.values()]
+}
+
+// What the lockfiles add to what Dependabot announced: whether an announced update is
+// direct, the direct ones it left out, and the rest to list on their own. A range may
+// differ from the announced one between directories, so the new version settles it.
+function applyLockfileChanges(announced, changes) {
+  const listed = []
+
+  for (const change of changes) {
+    const update =
+      announced.find(
+        ({ name, from, to }) => name === change.name && from === change.from && to === change.to,
+      ) ?? announced.find(({ name, to }) => name === change.name && to === change.to)
+
+    if (update) {
+      update.indirect = update.indirect === false ? false : (change.indirect ?? update.indirect)
+      update.project ??= change.project
+    } else if (change.indirect === false) {
+      announced.push(change)
+    } else {
+      listed.push(change)
+    }
+  }
+
+  return listed
 }
 
 async function listAll(path) {
@@ -1393,9 +1618,12 @@ function notesKind({ releases, commits, fromChangelog }) {
 
 // A table of everything the update moves, since the notes may run over several
 // comments and each section is folded.
-function renderOverview(entries) {
-  const rows = entries.flatMap((entry) => entry.updates.map((update) => ({ update, entry })))
-  if (rows.length < 2) {
+function renderOverview(entries, listed = []) {
+  const rows = [
+    ...entries.flatMap((entry) => entry.updates.map((update) => ({ update, notes: notesKind(entry) }))),
+    ...listed.map((update) => ({ update, notes: 'Not read' })),
+  ]
+  if (rows.length < 2 && !(listed.length > 0 && entries.length === 0)) {
     return null
   }
 
@@ -1407,11 +1635,11 @@ function renderOverview(entries) {
 
   let length = 0
   let shown = 0
-  for (const { update, entry } of rows) {
+  for (const { update, notes } of rows) {
     const scope = update.indirect ? 'indirect' : 'direct'
     const line =
       `| \`${update.name}\` | \`${shortRef(update.from)}\` → \`${shortRef(update.to)}\` | ` +
-      `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notesKind(entry)} |`
+      `${bumpKind(update)} |${scoped ? ` ${scope} |` : ''} ${notes} |`
     if (length + line.length > OVERVIEW_LIMIT) {
       break
     }
@@ -1598,14 +1826,13 @@ async function main() {
   }
 
   const commits = await listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
+  const trusted = commits.filter((commit) => anyAuthor || commit.author?.login === DEPENDABOT)
   const announced = parseUpdates(
-    commits
-      .filter((commit) => anyAuthor || commit.author?.login === DEPENDABOT)
-      .map((commit) => commit.commit.message)
-      .join('\n'),
+    trusted.map((commit) => commit.commit.message).join('\n'),
     pull.body ?? '',
   )
   const files = await listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
+  const listed = applyLockfileChanges(announced, await readLockfileChanges(files, trusted))
   const requirementChanges = parseRequirementChanges(files)
 
   const byRange = new Map(
@@ -1701,17 +1928,18 @@ async function main() {
     }
   }
 
-  const overview = renderOverview(entries)
+  const overview = renderOverview(entries, listed)
   const comments = intoComments([
     ...(overview ? [overview] : []),
     ...entries.map(renderDependency),
   ])
 
-  if (updates.length === 0) {
+  if (comments.length === 0) {
     console.log('No dependency updates found in the diff or the commit messages, nothing to post.')
   } else {
     console.log(
       `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}, ` +
+        (listed.length > 0 ? `${listed.length} listed from lockfiles, ` : '') +
         `${comments.length} comment(s): ` +
         comments.map((comment) => `${comment.length} chars`).join(', '),
     )
@@ -1734,7 +1962,12 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 }
 
 export {
+  applyLockfileChanges,
   bumpKind,
+  diffLockfile,
+  parseCargoLock,
+  parseComposerLock,
+  parsePackageLock,
   changelogSections,
   closeOpenMarkup,
   compareFor,

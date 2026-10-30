@@ -8,7 +8,9 @@ The action reads the dependencies from the commit messages, the description and 
 
 ## Supported ecosystems
 
-The action reads what Dependabot writes rather than the files of each language, so it is meant to work with any ecosystem Dependabot updates. Only Go gets more: its `go.mod` changes also reveal the indirect requirements and the ones a `go mod tidy` moved. Notes come from GitHub and GitLab only.
+The action reads what Dependabot writes rather than the files of each language, so it is meant to work with any ecosystem Dependabot updates. Go, npm, Cargo and Composer get more: `go.mod` and the lockfiles `package-lock.json`, `npm-shrinkwrap.json`, `Cargo.lock` and `composer.lock` also reveal what moves transitively, and which updates are direct. Notes come from GitHub and GitLab only.
+
+A transitive package only a lockfile names has no link to its notes, so the overview lists it with its range. Go's module proxy supplies that link, so a Go module gets its notes either way. A package a lockfile only adds or only drops has no range and is left out.
 
 | Ecosystem | What to expect |
 | --- | --- |
