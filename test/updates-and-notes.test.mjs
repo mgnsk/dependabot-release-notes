@@ -1,17 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import {
-  bumpKind,
-  changelogSections,
-  closeOpenMarkup,
-  compareVersions,
-  escapeUnknownTags,
-  hasForeignTags,
-  headPrefix,
-  parseUpdates,
-  parseVersion,
-} from '../dependabot-release-notes.mjs'
+import { hasForeignTags } from '../lib/go.mjs'
+import { changelogSections } from '../lib/notes.mjs'
+import { bumpKind, closeOpenMarkup, escapeUnknownTags } from '../lib/render.mjs'
+import { compareVersions, headPrefix, parseVersion } from '../lib/tags.mjs'
+import { parseUpdates } from '../lib/updates.mjs'
 import {
   MARKER,
   PULL_REQUEST,

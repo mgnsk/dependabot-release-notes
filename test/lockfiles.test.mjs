@@ -7,7 +7,11 @@ import {
   parseCargoLock,
   parseComposerLock,
   parsePackageLock,
-} from '../dependabot-release-notes.mjs'
+  parsePnpmLock,
+  parsePoetryLock,
+  parseUvLock,
+  parseYarnLock,
+} from '../lib/lockfiles.mjs'
 import {
   PULL_REQUEST,
   REPOSITORY,
@@ -344,5 +348,279 @@ describe('a pull request with a lockfile', () => {
 
     assert.deepEqual(run.posted, [])
     assert.match(run.stdout, /No notes found, nothing to post\. Updates: b 2\.0\.0 → 2\.1\.0/)
+  })
+})
+
+const names = (reading) => [...reading.versions].map(([name, versions]) => `${name} ${[...versions].join(' ')}`)
+
+describe('pnpm-lock.yaml', () => {
+  const lock = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+
+importers:
+
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.2.3
+      '@scope/bar':
+        specifier: ^2.0.0
+        version: 2.0.0(foo@1.2.3)
+    devDependencies:
+      dev:
+        specifier: 3.0.0
+        version: 3.0.0
+
+  packages/app:
+    dependencies:
+      work:
+        specifier: workspace:*
+        version: link:../work
+
+packages:
+
+  '@scope/bar@2.0.0':
+    resolution: {integrity: sha512-a}
+    peerDependencies:
+      foo: '*'
+
+  foo@1.2.3:
+    resolution: {integrity: sha512-b}
+
+  dep@1.0.0:
+    resolution: {integrity: sha512-c}
+
+  dep@2.0.0:
+    resolution: {integrity: sha512-d}
+
+snapshots:
+
+  foo@1.2.3: {}
+
+  other@9.9.9: {}
+`
+
+  test('gives the versions of the packages alone', () => {
+    assert.deepEqual(names(parsePnpmLock(lock)), ['@scope/bar 2.0.0', 'foo 1.2.3', 'dep 1.0.0 2.0.0'])
+  })
+
+  test('takes the direct names from the importers', () => {
+    assert.deepEqual([...parsePnpmLock(lock).direct], ['foo', '@scope/bar', 'dev', 'work'])
+  })
+
+  test('reads the slash and the peers of an older lockfile, and names at the top', () => {
+    const reading = parsePnpmLock(`lockfileVersion: '6.0'
+
+dependencies:
+  foo:
+    specifier: ^1
+    version: 1.2.3
+
+packages:
+
+  /foo@1.2.3(bar@2.0.0):
+    resolution: {integrity: sha512-b}
+
+  /@scope/baz@4.0.0:
+    resolution: {integrity: sha512-c}
+`)
+
+    assert.deepEqual(names(reading), ['foo 1.2.3', '@scope/baz 4.0.0'])
+    assert.deepEqual([...reading.direct], ['foo'])
+  })
+})
+
+describe('yarn.lock', () => {
+  const classic = `# yarn lockfile v1
+
+
+"@scope/foo@^1.0.0", "@scope/foo@^1.1.0":
+  version "1.2.3"
+  resolved "https://example.test/foo.tgz"
+  dependencies:
+    bar "^2.0.0"
+
+bar@^2.0.0:
+  version "2.1.0"
+
+bar@^1.0.0:
+  version "1.9.0"
+`
+  const berry = `__metadata:
+  version: 8
+  cacheKey: 10
+
+"@scope/foo@npm:^1.0.0, @scope/foo@npm:^1.1.0":
+  version: 1.2.3
+  resolution: "@scope/foo@npm:1.2.3"
+  dependencies:
+    bar: "npm:^2.0.0"
+  languageName: node
+
+"bar@npm:^2.0.0":
+  version: 2.1.0
+  resolution: "bar@npm:2.1.0"
+
+"app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:."
+  dependencies:
+    "@scope/foo": "npm:^1.0.0"
+  devDependencies:
+    bar: "npm:^2.0.0"
+  languageName: unknown
+`
+
+  test('classic gives the versions, and the direct names of the package.json', () => {
+    const reading = parseYarnLock(classic, JSON.stringify({ dependencies: { '@scope/foo': '^1' } }))
+
+    assert.deepEqual(names(reading), ['@scope/foo 1.2.3', 'bar 2.1.0 1.9.0'])
+    assert.deepEqual([...reading.direct], ['@scope/foo'])
+  })
+
+  test('classic cannot tell without a package.json, or with workspaces', () => {
+    assert.equal(parseYarnLock(classic, null).direct, null)
+    assert.equal(parseYarnLock(classic, JSON.stringify({ workspaces: ['a'] })).direct, null)
+  })
+
+  test('Berry gives the versions, and the direct names of its workspaces', () => {
+    const reading = parseYarnLock(berry, null)
+
+    assert.deepEqual(names(reading), ['@scope/foo 1.2.3', 'bar 2.1.0'])
+    assert.deepEqual([...reading.direct], ['@scope/foo', 'bar'])
+  })
+})
+
+describe('uv.lock', () => {
+  const lock = `version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "Requests" },
+]
+
+[package.optional-dependencies]
+fast = [
+    { name = "uvloop" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "not-read", specifier = ">=2" }]
+
+[[package]]
+name = "requests"
+version = "2.32.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://example.test/a.tar.gz", hash = "sha256:a" }
+
+[[package]]
+name = "urllib3"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+`
+
+  test('gives the versions, without the project', () => {
+    assert.deepEqual(names(parseUvLock(lock)), ['requests 2.32.0', 'urllib3 2.0.0'])
+  })
+
+  test('takes the direct names from the project, groups included', () => {
+    assert.deepEqual([...parseUvLock(lock).direct], ['requests', 'uvloop', 'ruff'])
+  })
+})
+
+describe('poetry.lock', () => {
+  const lock = `[[package]]
+name = "Typing_Extensions"
+version = "4.0.0"
+description = "x"
+
+[package.dependencies]
+foo = ">=1"
+
+[[package]]
+name = "deep"
+version = "1.0.0"
+
+[metadata]
+lock-version = "2.1"
+`
+
+  test('gives the versions under normalised names', () => {
+    assert.deepEqual(names(parsePoetryLock(lock, null)), ['typing-extensions 4.0.0', 'deep 1.0.0'])
+  })
+
+  test('cannot tell direct from indirect without a pyproject.toml', () => {
+    assert.equal(parsePoetryLock(lock, null).direct, null)
+  })
+
+  test("reads Poetry's tables from the pyproject.toml", () => {
+    const { direct } = parsePoetryLock(
+      lock,
+      `[tool.poetry]
+name = "app"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+Typing_Extensions = "^4"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.1"
+
+[tool.other]
+ignored = "1"
+`,
+    )
+
+    assert.deepEqual([...direct], ['typing-extensions', 'ruff'])
+  })
+
+  test('reads the standard lists from the pyproject.toml', () => {
+    const { direct } = parsePoetryLock(
+      lock,
+      `[project]
+name = "app"
+dependencies = [
+    "requests>=2",
+    "Typing_Extensions (>=4,<5)",
+]
+
+[project.optional-dependencies]
+fast = ["uvloop"]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+`,
+    )
+
+    assert.deepEqual([...direct], ['requests', 'typing-extensions', 'uvloop', 'ruff'])
+  })
+})
+
+describe('the spelling of a Python name', () => {
+  test('does not hide that an announced update is direct', () => {
+    const announced = [{ name: 'Typing_Extensions', from: '1.0', to: '2.0', links: {} }]
+    const listed = applyLockfileChanges(announced, [
+      { name: 'typing-extensions', from: '1.0', to: '2.0', links: {}, indirect: false },
+    ])
+
+    assert.deepEqual(listed, [])
+    assert.equal(announced[0].indirect, false)
   })
 })

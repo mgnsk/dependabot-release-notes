@@ -8,20 +8,26 @@ The action reads the dependencies from the commit messages, the description and 
 
 ## Supported ecosystems
 
-The action reads what Dependabot writes rather than the files of each language, so it is meant to work with any ecosystem Dependabot updates. Go, npm, Cargo and Composer get more: `go.mod` and the lockfiles `package-lock.json`, `npm-shrinkwrap.json`, `Cargo.lock` and `composer.lock` also reveal what moves transitively, and which updates are direct. Notes come from GitHub and GitLab only.
+The action reads what Dependabot writes rather than the files of each language. These are the ones it is built and tested for:
 
-A transitive package only a lockfile names has no link to its notes, so the overview lists it with its range, in a folded table of its own. A dependency without any notes gets a row in the overview and no section of its own, and when nothing has notes the action posts nothing. Go's module proxy supplies that link, so a Go module gets its notes either way. A package a lockfile only adds or only drops has no range and is left out.
+| Package manager | Read from | What to expect |
+| --- | --- | --- |
+| npm, pnpm, Yarn | Commit messages, lockfile | Release notes or changelog excerpts, with transitive packages listed |
+| uv, Poetry | Commit messages, lockfile | The same |
+| pip | Commit messages | Release notes or changelog excerpts |
+| Go modules | Commit messages, `go.mod`, module proxy | The same, for every requirement the update moves |
+| Cargo, Composer | Commit messages, lockfile | The same as npm |
+| Bundler | Commit messages | Release notes or changelog excerpts |
+| Maven, Gradle | Commit messages | The same when Dependabot links a project, which it often does not, and older projects often have no release for a tag |
+| NuGet | Commit messages, description | Release notes or changelog excerpts |
+| GitHub Actions | Commit messages | The same for version tags, and a list of commits for an action pinned to a commit hash |
+| Docker | Commit messages | Usually nothing, since Dependabot links no project for an image such as `alpine` |
 
-| Ecosystem | What to expect |
-| --- | --- |
-| npm, pip, Cargo, Composer, Bundler, Terraform, Go | Release notes or changelog excerpts, when Dependabot links a project on GitHub or GitLab |
-| NuGet | The same, with the versions read from the description |
-| Maven | The same, though older projects often have no release for a tag |
-| GitHub Actions | The same for version tags, and a list of commits for an action pinned to a commit hash |
-| Git submodules | A list of commits |
-| Docker | Usually no notes, since Dependabot links no project for an image such as `alpine` |
+Anything else Dependabot updates, such as Terraform, Hex, Pub or Git submodules, goes through the same reading of its commit messages on a best effort basis. Notes come from GitHub and GitLab only.
 
-The ecosystems above were tried on real pull requests. Others, such as Gradle, Swift, Hex and Pub, have not been tried. An update whose message the action cannot read gets no section, and a pull request with none of them logs "nothing to post" and still succeeds.
+A lockfile tells which updates are direct, and what moves transitively. A transitive package only a lockfile names has no link to its notes, so the overview lists it with its range, in a folded table of its own. Go's module proxy supplies that link, so a Go module gets its notes either way. A package a lockfile only adds or only drops has no range and is left out.
+
+A dependency without any notes gets a row in the overview and no section of its own, and when nothing has notes the action posts nothing. An update whose message the action cannot read gets no section, and a pull request with none of them logs a warning and still succeeds.
 
 ## Usage
 

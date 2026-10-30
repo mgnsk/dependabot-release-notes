@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
+import { closeOpenMarkup } from '../lib/render.mjs'
 import {
-  closeOpenMarkup,
   compareVersions,
   isCommitHash,
   parseVersion,
   projectFromLink,
   tagFromCommitsLink,
-} from '../dependabot-release-notes.mjs'
+} from '../lib/tags.mjs'
 
 const order = (left, right) => compareVersions(parseVersion(left, ''), parseVersion(right, ''))
 
