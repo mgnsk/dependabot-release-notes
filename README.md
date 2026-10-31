@@ -4,7 +4,7 @@ Posts the release notes of a Dependabot pull request as pull request comments, s
 
 GitHub caps a pull request description at 65,536 characters. A grouped update across many directories repeats every dependency's notes once per directory, so Dependabot's description is truncated and most dependencies end up with no notes at all.
 
-The action reads the dependencies from the commit messages, the description and the `go.mod` changes in the diff, then collects the notes from GitHub and GitLab. A project that publishes no release notes gets the versions from the changelog Dependabot links, or else the list of commits in the range. An update of several packages opens with an overview of them, Go's indirect requirements marked and listed last, and packages with the same notes share a section. Later pushes edit the existing comments rather than posting new ones.
+The action reads the dependencies from the commit messages, the description and the `go.mod` changes in the diff, then collects the notes from GitHub and GitLab. A project that publishes no release notes gets the versions from the changelog Dependabot links or one beside the package, or else the list of commits in the range. An update of several packages opens with an overview of them, Go's indirect requirements marked and listed last, and packages with the same notes share a section. Later pushes edit the existing comments rather than posting new ones.
 
 ## Supported ecosystems
 

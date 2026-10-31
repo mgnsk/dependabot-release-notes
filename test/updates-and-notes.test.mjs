@@ -625,3 +625,129 @@ describe('dependencies without notes', () => {
     assert.match(run.stdout, /No notes found, nothing to post\. Updates: b 1\.0\.0 → 1\.1\.0/)
   })
 })
+
+describe('an action pinned to a commit hash', () => {
+  const [base, head] = ['f06c13b6b1a9625abc9e6e439d9c05a8f2190e94', 'a4f02ab5355a589de60d917a659ce617ed19b3d0']
+  const message =
+    'Bumps [o/action](https://github.com/o/action) from 7.2.3 to 7.3.0.\n' +
+    `- [Commits](https://github.com/o/action/compare/${base}...${head})`
+
+  test('gets the releases of the versions it names', async () => {
+    const posted = await comment({
+      messages: [message],
+      routes: releasesRoute('o/action', [release('v7.3.0', 'the notes'), release('v7.2.3', 'old')]),
+    })
+
+    assert.deepEqual(heads(posted), ['v7.3.0'])
+  })
+
+  test('gets the commits of its hashes when there are no releases', async () => {
+    const posted = await comment({
+      messages: [message],
+      routes: {
+        ...releasesRoute('o/action', []),
+        ...compareRoute('o/action', base, head, [upstreamCommit('work')]),
+      },
+    })
+
+    assert.match(posted, /work/)
+  })
+
+  test('that names only hashes reads no releases', async () => {
+    const run = await runAction({
+      messages: [
+        `Bumps [o/action](https://github.com/o/action) from ${base} to ${head}.\n- [Commits](https://github.com/o/action/compare/${base}...${head})`,
+      ],
+      routes: compareRoute('o/action', base, head, [upstreamCommit('work')]),
+    })
+
+    assert.equal(run.code, 0, run.stderr)
+    assert.ok(!run.requests.some((request) => request.url.includes('/releases')))
+  })
+})
+
+describe('a changelog nobody linked', () => {
+  const file = (text) => ({ status: 200, body: { encoding: 'base64', content: Buffer.from(text).toString('base64') } })
+  const changes = '# v1.1.0 (2026-01-01)\n\n* a fix\n\n# v1.0.0 (2025-01-01)\n\n* old\n'
+
+  test('is found beside a module its tag names', async () => {
+    const name = 'github.com/o/sdk/service/sts'
+    const posted = await comment({
+      messages: [
+        `Updates \`${name}\` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/sdk/compare/service/sts/v1.0.0...service/sts/v1.1.0)`,
+      ],
+      routes: {
+        ...releasesRoute('o/sdk', []),
+        'GET https://api.github.com/repos/o/sdk/contents/service/sts/CHANGELOG.md?ref=service%2Fsts%2Fv1.1.0': file(changes),
+      },
+    })
+
+    assert.match(posted, /a fix/)
+    assert.doesNotMatch(posted, /old/)
+    assert.match(posted, /\[Changelog]\(https:\/\/github\.com\/o\/sdk\/blob\/service\/sts\/v1\.1\.0\/service\/sts\/CHANGELOG\.md\)/)
+  })
+
+  test('is found beside a package its commits link names', async () => {
+    const posted = await comment({
+      messages: ['Updates `p` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/m/commits/v1.1.0/packages/p)'],
+      routes: {
+        ...releasesRoute('o/m', []),
+        'GET https://api.github.com/repos/o/m/contents/packages/p/CHANGELOG.md?ref=v1.1.0': file(changes),
+      },
+    })
+
+    assert.match(posted, /a fix/)
+  })
+
+  test('is not looked for when one is linked', async () => {
+    const run = await runAction({
+      messages: [
+        'Updates `p` from 1.0.0 to 1.1.0\n- [Changelog](https://example.test/changes)\n- [Commits](https://github.com/o/p/compare/v1.0.0...v1.1.0)',
+      ],
+      routes: {
+        ...releasesRoute('o/p', []),
+        ...compareRoute('o/p', 'v1.0.0', 'v1.1.0', [upstreamCommit('work')]),
+      },
+    })
+
+    assert.ok(!run.requests.some((request) => request.url.includes('CHANGELOG')))
+  })
+})
+
+describe('the Go project mirrors', () => {
+  const origin = (name, tag) => ({ URL: `https://go.googlesource.com/${name}`, Ref: `refs/tags/${tag}` })
+  const go = (module, repo) => ({
+    files: [goModFile([[module, 'v1.0.0', 'v1.1.0']])],
+    routes: {
+      ...proxyRoute(module, 'v1.0.0', origin(repo, 'v1.0.0')),
+      ...proxyRoute(module, 'v1.1.0', origin(repo, 'v1.1.0')),
+    },
+  })
+
+  test('send protobuf to its own repository', async () => {
+    const { files, routes } = go('google.golang.org/protobuf', 'protobuf')
+    const posted = await comment({
+      files,
+      routes: {
+        ...routes,
+        ...releasesRoute('protocolbuffers/protobuf-go', [release('v1.1.0', 'pb notes'), release('v1.0.0', 'old')]),
+      },
+    })
+
+    assert.match(posted, /pb notes/)
+  })
+
+  test('send the rest to github.com/golang', async () => {
+    const { files, routes } = go('golang.org/x/net', 'net')
+    const posted = await comment({
+      files,
+      routes: {
+        ...routes,
+        ...releasesRoute('golang/net', []),
+        ...compareRoute('golang/net', 'v1.0.0', 'v1.1.0', [upstreamCommit('net work')]),
+      },
+    })
+
+    assert.match(posted, /net work/)
+  })
+})
