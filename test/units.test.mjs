@@ -66,6 +66,36 @@ describe('commits links', () => {
   }
 })
 
+describe('an open code fence', () => {
+  for (const [what, text, closed] of [
+    ['at the margin', '```js\ncode', '```js\ncode\n```'],
+    ['in a list item', '- item\n\n  ```js\n  code', '- item\n\n  ```js\n  code\n  ```'],
+    ['on a list marker', '1. ```js\n   code', '1. ```js\n   code\n   ```'],
+    ['in a nested list item', '- a\n  - b\n\n    ~~~\n    code', '- a\n  - b\n\n    ~~~\n    code\n    ~~~'],
+    ['back in the outer item', '- a\n  - b\n\n  ```\n  code', '- a\n  - b\n\n  ```\n  code\n  ```'],
+    ['indented with a tab', '- item\n\n\t```\n\tcode', '- item\n\n\t```\n\tcode\n  ```'],
+  ]) {
+    test(`is closed ${what}`, () => {
+      assert.equal(closeOpenMarkup(text), closed)
+    })
+  }
+
+  for (const [what, text] of [
+    ['a closed fence in a list item', '- item\n\n  ```\n  code\n  ```'],
+    ['a fence its list item ended', '- item\n\n  ```\n  code\nafter'],
+    ['inline code that fills a line', '```x```'],
+    ['a fence too deep to be one', '    ```\n    code'],
+  ]) {
+    test(`is not read from ${what}`, () => {
+      assert.equal(closeOpenMarkup(text), text)
+    })
+  }
+
+  test('after a list item it ended is still found', () => {
+    assert.equal(closeOpenMarkup('- item\n\n  ```\n  code\n```\nmore'), '- item\n\n  ```\n  code\n```\nmore\n```')
+  })
+})
+
 describe('open HTML', () => {
   test('is closed innermost first', () => {
     assert.equal(closeOpenMarkup('<div><pre>x'), '<div><pre>x\n</pre></div>')

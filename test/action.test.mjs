@@ -1392,6 +1392,12 @@ describe('references', () => {
 
   for (const [what, text, defused] of [
     ['a handle in parentheses', '(@alice)', `(@${ZERO_WIDTH_SPACE}alice)`],
+    ['a handle after a slash', 'see/@alice', `see/@${ZERO_WIDTH_SPACE}alice`],
+    ['a handle after a dot', 'see.@alice', `see.@${ZERO_WIDTH_SPACE}alice`],
+    ['a handle after a dash', 'see-@alice', `see-@${ZERO_WIDTH_SPACE}alice`],
+    ['a handle after a hash', '#@alice', `#@${ZERO_WIDTH_SPACE}alice`],
+    ['a handle after an at sign', '@@alice', `@@${ZERO_WIDTH_SPACE}alice`],
+    ['no version of a package', 'pkg@1.2.3', 'pkg@1.2.3'],
     ['an issue in another repository', 'org/repo#123', `org/repo#${ZERO_WIDTH_SPACE}123`],
     ['an issue of another owner', 'owner#123', `owner#${ZERO_WIDTH_SPACE}123`],
     ['a handle beside code', '`a` @alice `b`', `\`a\` @${ZERO_WIDTH_SPACE}alice \`b\``],
