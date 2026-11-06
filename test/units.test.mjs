@@ -110,6 +110,22 @@ describe('open HTML', () => {
   })
 })
 
+describe('a section that many packages share', () => {
+  test('names the first of them and counts the rest', () => {
+    const updates = Array.from({ length: 2_000 }, (_, index) => ({
+      name: `example.test/module${index}`,
+      from: '1.0.0',
+      to: '1.1.0',
+      links: {},
+    }))
+    const section = renderDependency({ updates, releases: [], commits: [{ title: 'c', url: 'u' }], total: 1 })
+
+    assert.match(section, /module49`/)
+    assert.doesNotMatch(section, /module50`/)
+    assert.match(section, /_… and 1950 more\._/)
+  })
+})
+
 describe('text quoted into link text', () => {
   const update = { name: 'x', from: '1', to: '2', links: {} }
   const hostile = 'Thanks @octocat, fixes #12 ] </details> <b> `a]b`'
