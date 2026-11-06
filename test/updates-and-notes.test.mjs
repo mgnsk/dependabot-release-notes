@@ -351,6 +351,23 @@ describe('changelogs', () => {
 
     assert.match(posted, /a commit/)
   })
+
+  test('are not read from a path that climbs out of the repository, escaped or not', async () => {
+    for (const climb of ['..', '%2e%2e', '%2E.']) {
+      const run = await runAction({
+        messages: [
+          message.replace('packages/pkg/CHANGELOG.md', `${climb}/${climb}/${climb}/other/secret/contents/x`),
+        ],
+        routes: {
+          ...releasesRoute('o/r', []),
+          ...compareRoute('o/r', 'v1.0.0', 'v1.2.0', [upstreamCommit('a commit')]),
+        },
+      })
+
+      assert.equal(run.code, 0, run.stderr)
+      assert.ok(!run.requests.some((request) => request.url.includes('/contents/')), climb)
+    }
+  })
 })
 
 describe('sections', () => {
