@@ -19,11 +19,6 @@
 // ones a go mod tidy pushed on top of the bump. The messages then only supply
 // the links Dependabot wrote, and the module proxy supplies the rest.
 //
-// A lockfile of npm, pnpm, Yarn, uv, Poetry, Cargo or Composer holds the same
-// account of what moved, the transitive packages included, but GitHub leaves the patch out of a large one, so
-// the file itself is compared between the two ends of the branch. A package only
-// the lockfile names has no link to any notes, and is listed in the overview.
-//
 // Usage: GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo PR_NUMBER=123 \
 //          node dependabot-release-notes.mjs [--dry-run]
 
@@ -33,7 +28,6 @@ import { configError, readConfig } from './lib/config.mjs'
 import { createForges } from './lib/forges.mjs'
 import { completeGoLinks, mergeRequirements } from './lib/go.mjs'
 import { createClient, warn } from './lib/http.mjs'
-import { applyLockfileChanges, readLockfileChanges } from './lib/lockfiles.mjs'
 import { createNotes } from './lib/notes.mjs'
 import { MARKER, hasNotes, intoComments, renderDependency, renderOverview } from './lib/render.mjs'
 import { parseUpdates } from './lib/updates.mjs'
@@ -134,28 +128,26 @@ async function publish(client, config, comments) {
   }
 }
 
-function report(updates, listed, files, comments) {
-  if (updates.length === 0 && listed.length === 0) {
+function report(updates, files, comments) {
+  if (updates.length === 0) {
     const nothing = 'No dependency updates found in the diff or the commit messages, nothing to post.'
     console.log(nothing)
     if (files.length > 0) {
       warn(`${nothing} The pull request changes ${files.length} file(s), so its format may be unknown.`)
     }
   } else if (comments.length === 0) {
-    const moved = [...updates, ...listed].map(({ name, from, to }) => `${name} ${from} → ${to}`)
+    const moved = updates.map(({ name, from, to }) => `${name} ${from} → ${to}`)
     console.log(`No notes found, nothing to post. Updates: ${moved.join(', ')}`)
   } else {
     console.log(
       `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}, ` +
-        (listed.length > 0 ? `${listed.length} listed from lockfiles, ` : '') +
         `${comments.length} comment(s): ` +
         comments.map((comment) => `${comment.length} chars`).join(', '),
     )
   }
 }
 
-// Every update the pull request makes, from its commits, its description and its
-// diff, and the packages only its lockfiles name.
+// Every update the pull request makes, from its commits, its description and its diff.
 async function readUpdates(client, config, pull) {
   const { repository, pullRequest, anyAuthor } = config
   const commits = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
@@ -163,12 +155,10 @@ async function readUpdates(client, config, pull) {
   const files = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
 
   const announced = parseUpdates(trusted.map((commit) => commit.commit.message).join('\n'), pull.body ?? '')
-  const lockfileChanges = await readLockfileChanges(client, repository, files, trusted, pull.base?.sha)
-  const { updates: withLockfiles, listed } = applyLockfileChanges(announced, lockfileChanges)
-  const { goUpdates, others } = mergeRequirements(files, withLockfiles)
+  const { goUpdates, others } = mergeRequirements(files, announced)
   const updates = [...(await completeGoLinks(client, goUpdates)), ...others]
 
-  return { updates, listed, files }
+  return { updates, files }
 }
 
 async function main() {
@@ -189,7 +179,7 @@ async function main() {
     return
   }
 
-  const { updates, listed, files } = await readUpdates(client, config, pull)
+  const { updates, files } = await readUpdates(client, config, pull)
   const { collectEntries } = createNotes({ client, forges: createForges(client) })
   const entries = await collectEntries(
     updates.toSorted((left, right) => Number(Boolean(left.indirect)) - Number(Boolean(right.indirect))),
@@ -197,13 +187,13 @@ async function main() {
 
   // With no notes for anything there is nothing to add to what Dependabot wrote.
   const withNotes = entries.filter(hasNotes)
-  const overview = withNotes.length > 0 ? renderOverview(entries, listed) : null
+  const overview = withNotes.length > 0 ? renderOverview(entries) : null
   const comments = intoComments([
     ...(overview ? [overview] : []),
     ...withNotes.map(renderDependency),
   ])
 
-  report(updates, listed, files, comments)
+  report(updates, files, comments)
 
   if (client.rateLimited) {
     console.error('Rate limited: some notes are missing. Run the action again later.')
