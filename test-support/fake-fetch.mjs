@@ -10,13 +10,10 @@ const log = process.env.FAKE_FETCH_LOG
 
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method ?? 'GET'
-  // Most projects keep no changelog where the action looks for one unasked.
-  const changelog = /\/(?:contents\/(?:.*\/)?|repository\/files\/(?:.*%2F)?)CHANGELOG\.md\?ref=/.test(url)
-  const route =
-    routes[`${method} ${url}`] ??
-    (changelog
-      ? { status: 404, body: { message: 'Not Found' } }
-      : { status: 599, body: { message: `No route for ${method} ${url}` } })
+  const route = routes[`${method} ${url}`] ?? {
+    status: 599,
+    body: { message: `No route for ${method} ${url}` },
+  }
 
   appendFileSync(
     log,

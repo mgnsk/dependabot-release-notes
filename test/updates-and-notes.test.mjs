@@ -655,49 +655,13 @@ describe('an action pinned to a commit hash', () => {
 })
 
 describe('a changelog nobody linked', () => {
-  const file = (text) => ({ status: 200, body: { encoding: 'base64', content: Buffer.from(text).toString('base64') } })
-  const changes = '# v1.1.0 (2026-01-01)\n\n* a fix\n\n# v1.0.0 (2025-01-01)\n\n* old\n'
-
-  test('is found beside a module its tag names', async () => {
-    const name = 'github.com/o/sdk/service/sts'
-    const posted = await comment({
-      messages: [
-        `Updates \`${name}\` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/sdk/compare/service/sts/v1.0.0...service/sts/v1.1.0)`,
-      ],
-      routes: {
-        ...releasesRoute('o/sdk', []),
-        'GET https://api.github.com/repos/o/sdk/contents/service/sts/CHANGELOG.md?ref=service%2Fsts%2Fv1.1.0': file(changes),
-      },
-    })
-
-    assert.match(posted, /a fix/)
-    assert.doesNotMatch(posted, /old/)
-    assert.match(posted, /\[Changelog]\(https:\/\/github\.com\/o\/sdk\/blob\/service\/sts\/v1\.1\.0\/service\/sts\/CHANGELOG\.md\)/)
-  })
-
-  test('is found beside a package its commits link names', async () => {
-    const posted = await comment({
-      messages: ['Updates `p` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/m/commits/v1.1.0/packages/p)'],
-      routes: {
-        ...releasesRoute('o/m', []),
-        'GET https://api.github.com/repos/o/m/contents/packages/p/CHANGELOG.md?ref=v1.1.0': file(changes),
-      },
-    })
-
-    assert.match(posted, /a fix/)
-  })
-
-  test('is not looked for when one is linked', async () => {
+  test('is not looked for', async () => {
     const run = await runAction({
-      messages: [
-        'Updates `p` from 1.0.0 to 1.1.0\n- [Changelog](https://example.test/changes)\n- [Commits](https://github.com/o/p/compare/v1.0.0...v1.1.0)',
-      ],
-      routes: {
-        ...releasesRoute('o/p', []),
-        ...compareRoute('o/p', 'v1.0.0', 'v1.1.0', [upstreamCommit('work')]),
-      },
+      messages: ['Updates `p` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/m/commits/v1.1.0/packages/p)'],
+      routes: { ...releasesRoute('o/m', []), ...compareRoute('o/m', 'v1.0.0', 'v1.1.0', [upstreamCommit('work')]) },
     })
 
+    assert.equal(run.code, 0, run.stderr)
     assert.ok(!run.requests.some((request) => request.url.includes('CHANGELOG')))
   })
 })
