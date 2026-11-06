@@ -1244,8 +1244,6 @@ describe('paging', () => {
       routes[releasesUrl(number)] = ok(page(number * 100))
     }
 
-    routes['GET https://api.github.com/repos/foo/bar/git/matching-refs/tags/v1.'] = ok([])
-
     const run = await succeed({ messages: [barUpdate()], routes })
 
     assert.equal(run.requests.filter((request) => request.url.includes('/releases')).length, 10)

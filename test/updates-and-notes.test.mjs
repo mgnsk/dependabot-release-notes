@@ -224,72 +224,35 @@ describe('Go links', () => {
 describe('more releases than the page limit', () => {
   const filler = (number) =>
     Array.from({ length: 100 }, (_, index) => release(`v9.${number}.${index}-canary.1`, 'filler'))
-  const pages = () => {
+  const pages = (first = filler(1)) => {
     const routes = {}
     for (let number = 1; number <= 10; number++) {
-      routes[`GET https://api.github.com/repos/o/r/releases?per_page=100&page=${number}`] = ok(filler(number))
+      routes[`GET https://api.github.com/repos/o/r/releases?per_page=100&page=${number}`] = ok(
+        number === 1 ? first : filler(number),
+      )
     }
 
     return routes
   }
-  const message = 'Updates `r` from 1.0.0 to 1.2.0\n- [Commits](https://github.com/o/r/compare/v1.0.0...v1.2.0)'
-  const tagsRoute = (major, tags) => ({
-    [`GET https://api.github.com/repos/o/r/git/matching-refs/tags/v${major}.`]: ok(
-      tags.map((tag) => ({ ref: `refs/tags/${tag}` })),
-    ),
-  })
-  const byTag = (tag, route) => ({ [`GET https://api.github.com/repos/o/r/releases/tags/${tag}`]: route })
+  const block = (from, to) =>
+    `Updates \`r\` from ${from} to ${to}\n- [Commits](https://github.com/o/r/compare/v${from}...v${to})`
 
-  test('are found by their tags, skipping a tag without a release', async () => {
+  test('are not read, and the section says so', async () => {
     const posted = await comment({
-      messages: [message],
-      routes: {
-        ...pages(),
-        ...tagsRoute(1, ['v1.0.0', 'v1.1.0', 'v1.1.5', 'v1.2.0', 'v1.2.0-rc.1', 'v1.3.0']),
-        ...byTag('v1.1.0', ok(release('v1.1.0', 'one one'))),
-        ...byTag('v1.1.5', notFound),
-        ...byTag('v1.2.0', ok(release('v1.2.0', 'one two'))),
-      },
+      messages: [block('1.0.0', '1.2.0')],
+      routes: { ...pages([release('v1.2.0', 'one two'), ...filler(1).slice(1)]) },
     })
 
-    assert.deepEqual(heads(posted), ['v1.1.0', 'v1.2.0'])
-    assert.doesNotMatch(posted, /not read/)
-  })
-
-  test('say so when too many are left to look up', async () => {
-    const tags = Array.from({ length: 25 }, (_, index) => `v1.1.${index}`)
-    const routes = { ...pages(), ...tagsRoute(1, ['v1.0.0', ...tags, 'v1.2.0']) }
-    for (const tag of [...tags, 'v1.2.0']) {
-      routes[Object.keys(byTag(tag))[0]] = ok(release(tag, `notes ${tag}`))
-    }
-
-    const posted = await comment({ messages: [message], routes })
-
+    assert.deepEqual(heads(posted), ['v1.2.0'])
     assert.match(posted, /Older releases in this range were not read/)
-    assert.equal(heads(posted).at(-1), 'v1.2.0')
-    assert.equal(heads(posted).length, 20)
   })
-})
 
-describe('ranges that share their notes', () => {
-  test('say that older releases were not read when one of them says so', async () => {
-    const routes = {}
-    for (let number = 1; number <= 10; number++) {
-      routes[`GET https://api.github.com/repos/o/r/releases?per_page=100&page=${number}`] = ok(
-        Array.from({ length: 100 }, (_, index) => release(`v9.${number}.${index}-canary.1`, 'filler')),
-      )
-    }
-    for (const major of [7, 6, 5, 4, 3]) {
-      routes[`GET https://api.github.com/repos/o/r/git/matching-refs/tags/v${major}.`] = ok(
-        major >= 6 ? [{ ref: `refs/tags/v${major}.0.0` }] : [],
-      )
-    }
-    routes['GET https://api.github.com/repos/o/r/releases/tags/v7.0.0'] = ok(release('v7.0.0', 'seven'))
-    routes['GET https://api.github.com/repos/o/r/releases/tags/v6.0.0'] = notFound
-
-    const block = (from) =>
-      `Updates \`r\` from ${from} to 7.0.0\n- [Commits](https://github.com/o/r/compare/v${from}...v7.0.0)`
-    const posted = await comment({ messages: [`${block('6.0.0')}\n\n${block('1.0.0')}`], routes })
+  test('leave a range that shares its notes saying so', async () => {
+    const first = [release('v7.0.0', 'seven'), release('v7.0.0-rc.1', 'rc'), ...filler(1).slice(2)]
+    const posted = await comment({
+      messages: [`${block('7.0.0-rc.1', '7.0.0')}\n\n${block('1.0.0', '7.0.0')}`],
+      routes: pages(first),
+    })
 
     assert.equal(count(posted, '<summary><code>'), 1)
     assert.match(posted, /Older releases in this range were not read/)
