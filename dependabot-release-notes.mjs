@@ -27,6 +27,8 @@
 // Usage: GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo PR_NUMBER=123 \
 //          node dependabot-release-notes.mjs [--dry-run]
 
+import { randomUUID } from 'node:crypto'
+
 import { completeGoLinks, mergeRequirements } from './lib/go.mjs'
 import { api, listAll, rateLimited, repository, token, unavailable, warn } from './lib/http.mjs'
 import { applyLockfileChanges, readLockfileChanges } from './lib/lockfiles.mjs'
@@ -90,6 +92,19 @@ async function readPullRequest() {
   return pull
 }
 
+// On a runner a line of output that reads ::name:: is a workflow command, and the
+// notes are someone else's words. Commands stay off until a token they cannot guess.
+function printQuoted(text) {
+  if (process.env.GITHUB_ACTIONS !== 'true') {
+    console.log(`\n${text}`)
+
+    return
+  }
+
+  const resume = randomUUID()
+  console.log(`::stop-commands::${resume}\n${text}\n::${resume}::`)
+}
+
 // Every push to the pull request runs this again. Edit the comments already
 // posted rather than replace them, so that they keep their place in the
 // timeline and the replies and reactions they collected. A comment whose notes
@@ -98,7 +113,7 @@ async function readPullRequest() {
 async function publish(comments) {
   if (dryRun) {
     if (comments.length > 0) {
-      console.log(`\n${comments.join('\n\n========================================\n\n')}`)
+      printQuoted(comments.join('\n\n========================================\n\n'))
     }
 
     return

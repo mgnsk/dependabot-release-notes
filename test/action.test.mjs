@@ -841,6 +841,22 @@ describe('posting', () => {
     )
   })
 
+  test('prints no workflow command on a dry run on a runner', async () => {
+    const run = await succeed({
+      messages: [barUpdate()],
+      routes: releasesRoute('foo/bar', [release('v1.2.0', '::error::injected')]),
+      args: ['--dry-run'],
+      env: { GITHUB_ACTIONS: 'true' },
+    })
+
+    const [, resume] = /^::stop-commands::(\S+)$/m.exec(run.stdout) ?? []
+    assert.ok(resume)
+    const start = run.stdout.indexOf(`::stop-commands::${resume}`)
+    const end = run.stdout.indexOf(`::${resume}::`)
+    assert.ok(start < run.stdout.indexOf('::error::injected'))
+    assert.ok(run.stdout.indexOf('::error::injected') < end)
+  })
+
   test('posts a new comment with the token', async () => {
     const run = await succeed(options)
 
