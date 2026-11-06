@@ -82,6 +82,14 @@ describe('commit messages', () => {
     ])
   })
 
+  test('mark a quoted hash as one, digits only or not', () => {
+    const [update] = parseUpdates('Bumps [sub](https://github.com/o/sub) from `1234567` to `a60f53e`.')
+
+    assert.equal(update.pinned, true)
+    assert.equal(bumpKind(update), 'commit')
+    assert.equal(bumpKind({ from: '1234567', to: '1234568' }), '**major**')
+  })
+
   test('do not report the headline of a group', () => {
     assert.deepEqual(
       ranges('Bumps `org.spring` from 1.0 to 2.0.\n\nUpdates `core` from 1.0 to 2.0\n- [Commits](https://github.com/o/r/compare/v1.0...v2.0)'),

@@ -27,7 +27,7 @@ describe('versions', () => {
 })
 
 describe('commit hashes', () => {
-  for (const ref of ['4aaaaaa', 'abcdef1234', 'a'.repeat(40)]) {
+  for (const ref of ['4aaaaaa', 'abcdef1234', 'a'.repeat(40), '1'.repeat(40)]) {
     test(`${ref} is one`, () => assert.ok(isCommitHash(ref)))
   }
   for (const ref of ['v1.2.3', '1.2.3', '20240101', '1234567', 'abc']) {
