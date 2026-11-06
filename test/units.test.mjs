@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { closeOpenMarkup } from '../lib/render.mjs'
+import { closeOpenMarkup, renderDependency } from '../lib/render.mjs'
 import {
   compareVersions,
   isCommitHash,
@@ -108,4 +108,28 @@ describe('open HTML', () => {
   test('that was closed is left alone', () => {
     assert.equal(closeOpenMarkup('<table>x</table>'), '<table>x</table>')
   })
+})
+
+describe('text quoted into link text', () => {
+  const update = { name: 'x', from: '1', to: '2', links: {} }
+  const hostile = 'Thanks @octocat, fixes #12 ] </details> <b> `a]b`'
+
+  for (const [what, entry] of [
+    [
+      'a release name',
+      { releases: [{ tag: 'v2', name: hostile, body: 'b', url: 'https://example.test/v2' }], commits: [] },
+    ],
+    ['a commit title', { releases: [], commits: [{ title: hostile, url: 'https://example.test/c' }], total: 1 }],
+  ]) {
+    test(`from ${what} cannot mention, reference, close the section or end the link`, () => {
+      const section = renderDependency({ updates: [update], total: 0, ...entry })
+
+      assert.match(section, /@​octocat/)
+      assert.match(section, /#​12/)
+      assert.equal(section.match(/<\/details>/g).length, 1)
+      assert.ok(!section.includes('<b>'))
+      assert.match(section, /fixes #​12 \\] /)
+      assert.match(section, /`a]b`\]\(https:\/\/example\.test/)
+    })
+  }
 })
