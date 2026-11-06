@@ -526,11 +526,12 @@ describe('finding the notes', () => {
         release('v1.45.0', 'the right notes', { name: 'Release v1.45.0/v2.5.2/v0.70.0/v0.1.0' }),
         release('v1.44.0', 'older notes', { name: 'Release v1.44.0/v0.69.0' }),
         release('v1.46.0', 'lookalike notes', { name: 'Release v1.46.0/v0.70.01/v10.70.0' }),
+        release('exporter/foo/v0.70.0', 'another module\'s notes', { name: 'exporter/foo v0.70.0' }),
       ]),
     })
 
     assert.match(comment, /the right notes/)
-    assert.doesNotMatch(comment, /older notes|lookalike notes/)
+    assert.doesNotMatch(comment, /older notes|lookalike notes|another module/)
   })
 
   test('does not read release names for a module at the repository root', async () => {
