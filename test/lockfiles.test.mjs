@@ -15,6 +15,7 @@ import {
 import {
   PULL_REQUEST,
   REPOSITORY,
+  dependabotCommit,
   notFound,
   ok,
   release,
@@ -193,13 +194,7 @@ describe('a pull request with a lockfile', () => {
   })
   const message =
     'Updates `a` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/a/compare/v1.0.0...v1.1.0)'
-  const dependabot = { login: 'dependabot[bot]' }
-  const commit = {
-    sha: 'head',
-    parents: [{ sha: 'base' }],
-    author: dependabot,
-    commit: { message },
-  }
+  const commit = dependabotCommit(message, { sha: 'head', parents: [{ sha: 'base' }] })
   const files = [{ filename: 'package-lock.json', status: 'modified' }]
   const notes = releasesRoute('o/a', [release('v1.1.0', 'a notes'), release('v1.0.0', 'old')])
 
@@ -340,7 +335,7 @@ describe('a pull request with a lockfile', () => {
     const run = await runAction({
       files,
       routes: {
-        ...commitsRoute([{ ...commit, commit: { message: 'Bump things' } }]),
+        ...commitsRoute([{ ...commit, commit: { ...commit.commit, message: 'Bump things' } }]),
         ...file('package-lock.json', 'base', npm('1.0.0', '2.0.0', '3.0.0')),
         ...file('package-lock.json', 'head', npm('1.0.0', '2.1.0', '3.0.0')),
       },

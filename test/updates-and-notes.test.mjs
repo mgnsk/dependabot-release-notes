@@ -11,6 +11,7 @@ import {
   PULL_REQUEST,
   REPOSITORY,
   compareRoute,
+  dependabotCommit,
   goModFile,
   notFound,
   ok,
@@ -541,6 +542,24 @@ describe('commits pushed on top', () => {
     assert.deepEqual(run.posted, [])
     assert.ok(!run.requests.some((request) => request.url.includes('/evil/')))
   })
+
+  for (const [what, fields] of [
+    ['an author spoofed with Dependabot\'s address', { committer: { login: 'someone' } }],
+    ['an unsigned commit', { commit: { verification: { verified: false } } }],
+  ]) {
+    test(`are not read from ${what}`, async () => {
+      const run = await runAction({
+        routes: {
+          [`GET ${API}/pulls/${PULL_REQUEST}/commits?per_page=100&page=1`]: ok([
+            dependabotCommit(human.commit.message, fields),
+          ]),
+        },
+      })
+
+      assert.deepEqual(run.posted, [])
+      assert.ok(!run.requests.some((request) => request.url.includes('/evil/')))
+    })
+  }
 
   test('are read with any-author', async () => {
     const run = await runAction({

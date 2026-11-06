@@ -39,6 +39,17 @@ export function proxyRoute(name, version, origin) {
   }
 }
 
+// A commit as GitHub lists one Dependabot made: by its account, committed and
+// signed by GitHub.
+export function dependabotCommit(message, fields = {}) {
+  return {
+    author: { login: 'dependabot[bot]' },
+    committer: { login: 'web-flow' },
+    ...fields,
+    commit: { message, verification: { verified: true }, ...fields.commit },
+  }
+}
+
 export function release(tag, body, fields = {}) {
   return {
     tag_name: tag,
@@ -81,7 +92,7 @@ function defaultRoutes(messages, files, comments) {
 
   paginate(
     `/pulls/${PULL_REQUEST}/commits`,
-    messages.map((message) => ({ author: { login: 'dependabot[bot]' }, commit: { message } })),
+    messages.map((message) => dependabotCommit(message)),
   )
   paginate(`/pulls/${PULL_REQUEST}/files`, files)
   paginate(

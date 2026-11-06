@@ -105,6 +105,19 @@ describe('startup and exit', () => {
     })
   }
 
+  for (const [name, value] of [
+    ['PR_NUMBER', '7/../../../user'],
+    ['PR_NUMBER', '7?x'],
+    ['GITHUB_REPOSITORY', 'owner/repo/../../user'],
+  ]) {
+    test(`exits 1 on ${name}=${value}`, async () => {
+      const run = await runAction({ env: { [name]: value } })
+
+      assert.equal(run.code, 1)
+      assert.deepEqual(run.requests, [])
+    })
+  }
+
   test('posts nothing when no updates are found', async () => {
     const run = await succeed({ messages: ['Fix a typo'] })
 

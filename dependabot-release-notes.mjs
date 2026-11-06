@@ -48,6 +48,16 @@ const dryRun = process.argv.includes('--dry-run')
 
 const DEPENDABOT = 'dependabot[bot]'
 
+// Anyone can write Dependabot's address into a commit, which GitHub then lists as
+// Dependabot's. Only GitHub can sign a commit as itself, which it does for Dependabot's.
+function isDependabots(commit) {
+  return (
+    commit.author?.login === DEPENDABOT &&
+    commit.committer?.login === 'web-flow' &&
+    commit.commit?.verification?.verified === true
+  )
+}
+
 // What Dependabot ends a description with when it did not fit.
 const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
 
@@ -150,6 +160,12 @@ async function main() {
     process.exit(1)
   }
 
+  // Both go into the path of every request, the writes included.
+  if (!/^[1-9]\d*$/.test(pullRequest) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
+    console.error(`Not a pull request number and a repository: ${pullRequest}, ${repository}`)
+    process.exit(1)
+  }
+
   const pull = await readPullRequest()
 
   if (onlyWhenTruncated && !pull.body?.includes(TRUNCATED_DESCRIPTION)) {
@@ -160,7 +176,7 @@ async function main() {
   }
 
   const commits = await listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
-  const trusted = commits.filter((commit) => anyAuthor || commit.author?.login === DEPENDABOT)
+  const trusted = commits.filter((commit) => anyAuthor || isDependabots(commit))
   const announced = parseUpdates(
     trusted.map((commit) => commit.commit.message).join('\n'),
     pull.body ?? '',
