@@ -12,13 +12,6 @@ inputs:
     description: Login that the token posts as, whose comments the action may edit and delete
     default: github-actions[bot]
 
-  any-author:
-    description: Run on a pull request that Dependabot did not open, and read commits anyone pushed to one
-    default: "false"
-  only-when-truncated:
-    description: Post only when Dependabot had to truncate the description, and take back earlier comments otherwise
-    default: "false"
-
 runs:
   using: node24
   main: dependabot-release-notes.mjs

@@ -34,9 +34,6 @@ import { parseUpdates } from './lib/updates.mjs'
 
 const DEPENDABOT = 'dependabot[bot]'
 
-// What Dependabot ends a description with when it did not fit.
-const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
-
 // Anyone can write Dependabot's address into a commit, which GitHub then lists as
 // Dependabot's. Only GitHub can sign a commit as itself, which it does for Dependabot's.
 function isDependabots(commit) {
@@ -49,19 +46,16 @@ function isDependabots(commit) {
 
 // The action runs with a write token, and a pull request's commit messages and
 // description decide what it asks for and quotes, so they have to be Dependabot's.
-// A commit pushed on top of Dependabot's has no say, unless any-author is set.
-async function readPullRequest({ api }, { repository, pullRequest, anyAuthor }) {
+// A commit pushed on top of Dependabot's has no say.
+async function readPullRequest({ api }, { repository, pullRequest }) {
   const path = `/repos/${repository}/pulls/${pullRequest}`
   const pull = await api(path)
   if (!pull) {
     throw new Error(`GET ${path}: 404, check the pull request number and the token's access`)
   }
 
-  if (pull.user?.login !== DEPENDABOT && !anyAuthor) {
-    throw new Error(
-      `Pull request ${pullRequest} was opened by ${pull.user?.login}, not ${DEPENDABOT}. ` +
-        'Set any-author to run on it anyway.',
-    )
+  if (pull.user?.login !== DEPENDABOT) {
+    throw new Error(`Pull request ${pullRequest} was opened by ${pull.user?.login}, not ${DEPENDABOT}.`)
   }
 
   return pull
@@ -149,9 +143,9 @@ function report(updates, files, comments) {
 
 // Every update the pull request makes, from its commits, its description and its diff.
 async function readUpdates(client, config, pull) {
-  const { repository, pullRequest, anyAuthor } = config
+  const { repository, pullRequest } = config
   const commits = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
-  const trusted = commits.filter((commit) => anyAuthor || isDependabots(commit))
+  const trusted = commits.filter(isDependabots)
   const files = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
 
   const announced = parseUpdates(trusted.map((commit) => commit.commit.message).join('\n'), pull.body ?? '')
@@ -171,13 +165,6 @@ async function main() {
 
   const client = createClient(config)
   const pull = await readPullRequest(client, config)
-
-  if (config.onlyWhenTruncated && !pull.body?.includes(TRUNCATED_DESCRIPTION)) {
-    console.log('The description holds all of its notes, nothing to post.')
-    await publish(client, config, [])
-
-    return
-  }
 
   const { updates, files } = await readUpdates(client, config, pull)
   const { collectEntries } = createNotes({ client, forges: createForges(client) })

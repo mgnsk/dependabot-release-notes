@@ -1607,16 +1607,6 @@ describe('pull request author', () => {
     assert.match(run.stderr, /opened by someone/)
     assert.deepEqual(run.posted, [])
   })
-
-  test('may be anyone with any-author set', async () => {
-    const run = await succeed({
-      messages: [barUpdate()],
-      env: { 'INPUT_ANY-AUTHOR': 'true' },
-      routes: { ...opened('someone'), ...releasesRoute('foo/bar', [release('v1.2.0', 'notes')]) },
-    })
-
-    assert.equal(run.posted.length, 1)
-  })
 })
 
 describe('action inputs', () => {

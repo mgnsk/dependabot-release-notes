@@ -525,41 +525,6 @@ describe('indirect requirements', () => {
   })
 })
 
-describe('only-when-truncated', () => {
-  const message = 'Updates `a` from 1.0.0 to 1.1.0\n- [Commits](https://github.com/o/a/compare/v1.0.0...v1.1.0)'
-  const env = { ONLY_WHEN_TRUNCATED: 'true' }
-  const routes = releasesRoute('o/a', [release('v1.1.0', 'notes'), release('v1.0.0', 'old')])
-
-  test('posts nothing for a description that fits, and asks for nothing', async () => {
-    const run = await runAction({ messages: [message], env, routes: { ...routes, ...pullWith('Short') } })
-
-    assert.equal(run.code, 0)
-    assert.deepEqual(run.posted, [])
-    assert.ok(!run.requests.some((request) => request.url.includes('/releases')))
-  })
-
-  test('takes back what it posted when the description fits again', async () => {
-    const run = await runAction({
-      messages: [message],
-      env,
-      comments: [{ id: 3, body: `${MARKER}\nOld` }],
-      routes: { ...routes, ...pullWith('Short') },
-    })
-
-    assert.deepEqual(run.deleted, [3])
-  })
-
-  test('posts for a truncated description', async () => {
-    const run = await runAction({
-      messages: [message],
-      env,
-      routes: { ...routes, ...pullWith('Long...\n\n_Description has been truncated_') },
-    })
-
-    assert.match(run.posted[0], /notes/)
-  })
-})
-
 describe('commits pushed on top', () => {
   const human = {
     author: { login: 'someone' },
@@ -593,15 +558,6 @@ describe('commits pushed on top', () => {
       assert.ok(!run.requests.some((request) => request.url.includes('/evil/')))
     })
   }
-
-  test('are read with any-author', async () => {
-    const run = await runAction({
-      env: { ANY_AUTHOR: 'true' },
-      routes: { ...routes, ...releasesRoute('evil/evil', [release('v1.1.0', 'x'), release('v1.0.0', 'y')]) },
-    })
-
-    assert.equal(run.posted.length, 1)
-  })
 })
 
 describe('a headline above a block of the same name', () => {

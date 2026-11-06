@@ -64,7 +64,7 @@ jobs:
 
 The job runs with a write token, so it must never check out or execute the code under review. It needs no checkout at all. For the same reason, pin the action to a full commit SHA rather than a tag that can move.
 
-The action refuses a pull request that Dependabot did not open and ignores the messages of commits anyone else pushed to one, unless `any-author` is set, so that `workflow_dispatch` cannot be pointed at commit messages written by anyone else. A commit counts as Dependabot's only when GitHub signed it, since anyone can write Dependabot's address into a commit of their own.
+The action refuses a pull request that Dependabot did not open and ignores the messages of commits anyone else pushed to one, so that `workflow_dispatch` cannot be pointed at commit messages written by anyone else. A commit counts as Dependabot's only when GitHub signed it, since anyone can write Dependabot's address into a commit of their own.
 
 A rate limit that lifts within a minute is waited out. A temporary failure that persists, such as a longer rate limit or a 5xx through retries, fails the run. Comments from an earlier run are then left as they are; with none to keep, the action posts what it has.
 
@@ -75,8 +75,6 @@ A rate limit that lifts within a minute is waited out. A temporary failure that 
 | `token` | `github.token` | Token that reads the pull request and writes its comments |
 | `pull-request` | The triggering pull request | Pull request number to comment on |
 | `author` | `github-actions[bot]` | Login that the token posts as, whose comments the action may edit and delete. Set it when `token` belongs to another account |
-| `any-author` | `false` | Run on a pull request that Dependabot did not open, and read commits anyone pushed to one |
-| `only-when-truncated` | `false` | Post only when Dependabot had to truncate the description, and take back earlier comments otherwise |
 
 ## Running locally
 
