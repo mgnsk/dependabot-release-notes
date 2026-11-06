@@ -197,7 +197,7 @@ async function main() {
     pull.body ?? '',
   )
   const files = await listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
-  const listed = applyLockfileChanges(announced, await readLockfileChanges(files, trusted))
+  const listed = applyLockfileChanges(announced, await readLockfileChanges(files, trusted, pull.base?.sha))
   const { updates, goUpdates } = mergeRequirements(files, announced)
   await completeGoLinks(goUpdates)
 

@@ -259,6 +259,31 @@ describe('a pull request with a lockfile', () => {
     assert.ok(!run.requests.some((request) => request.url.endsWith('ref=human')))
   })
 
+  test('compares from where the branch last met the base branch merged into it', async () => {
+    const merge = {
+      sha: 'merge',
+      author: { login: 'someone' },
+      parents: [{ sha: 'head' }, { sha: 'main' }],
+      commit: { message: 'Merge main' },
+    }
+    const run = await runAction({
+      files,
+      env: { ANY_AUTHOR: 'true' },
+      routes: {
+        ...commitsRoute([commit, merge]),
+        [`GET ${API}/pulls/${PULL_REQUEST}`]: ok({ user: { login: 'dependabot[bot]' }, base: { sha: 'tip' } }),
+        [`GET ${API}/compare/tip...merge`]: ok({ merge_base_commit: { sha: 'main' } }),
+        ...notes,
+        ...file('package-lock.json', 'main', npm('1.0.0', '5.0.0')),
+        ...file('package-lock.json', 'merge', npm('1.1.0', '5.0.0')),
+      },
+    })
+
+    assert.equal(run.code, 0, run.stderr)
+    assert.ok(!run.requests.some((request) => request.url.endsWith('ref=base')))
+    assert.doesNotMatch(run.posted[0], /`b`/)
+  })
+
   test('reads composer.json beside composer.lock', async () => {
     const lock = (version) => JSON.stringify({ packages: [{ name: 'a', version }, { name: 'z/deep', version }] })
     const manifest = JSON.stringify({ require: { a: '*' } })
