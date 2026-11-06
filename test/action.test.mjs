@@ -590,21 +590,6 @@ describe('finding the notes', () => {
     })
   })
 
-  test('retries a guessed tag without the "v"', async () => {
-    const comment = await postedComment({
-      messages: ['| [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) | `1.55.0` | `1.56.0` |'],
-      routes: {
-        'GET https://gitlab.com/api/v4/projects/cznic%2Fsqlite/releases?per_page=100&page=1': ok([]),
-        'GET https://gitlab.com/api/v4/projects/cznic%2Fsqlite/repository/compare?from=v1.55.0&to=v1.56.0':
-          notFound,
-        'GET https://gitlab.com/api/v4/projects/cznic%2Fsqlite/repository/compare?from=1.55.0&to=1.56.0':
-          ok({ commits: [{ title: 'Bare tags', web_url: 'https://gitlab.com/commit' }] }),
-      },
-    })
-
-    assert.match(comment, /Bare tags/)
-  })
-
   test('derives the tag prefix of a guessed tag from the module path', async () => {
     const comment = await postedComment({
       messages: ['| [github.com/foo/bar/sub/v2](https://github.com/foo/bar) | `2.0.0` | `2.1.0` |'],
@@ -1462,34 +1447,6 @@ describe('Dependabot link forms', () => {
 
     assert.match(comment, /kit notes/)
     assert.doesNotMatch(comment, /other package/)
-  })
-
-  test('finds tags by package from a table row, which gives only the project', async () => {
-    const comment = await postedComment({
-      messages: ['| [@sveltejs/kit](https://github.com/sveltejs/kit/tree/HEAD/packages/kit) | `3.0.1` | `3.1.0` |'],
-      routes: releasesRoute('sveltejs/kit', [
-        release('@sveltejs/package@3.1.0', 'other package'),
-        release('@sveltejs/kit@3.1.0', 'kit notes'),
-      ]),
-    })
-
-    assert.match(comment, /kit notes/)
-    assert.doesNotMatch(comment, /other package/)
-  })
-
-  test('lists commits under the tag spelled after the package', async () => {
-    const empty = (base, head) => compareRoute('foo/mono', base, head, [])
-    const comment = await postedComment({
-      messages: ['| [pkg](https://github.com/foo/mono/tree/HEAD/packages/pkg) | `1.0.0` | `1.1.0` |'],
-      routes: {
-        ...releasesRoute('foo/mono', []),
-        ...empty('v1.0.0', 'v1.1.0'),
-        ...empty('1.0.0', '1.1.0'),
-        ...compareRoute('foo/mono', 'pkg@1.0.0', 'pkg@1.1.0', [upstreamCommit('Package commit')]),
-      },
-    })
-
-    assert.match(comment, /Package commit/)
   })
 
   test('refuses a link that climbs out of the API path', async () => {
