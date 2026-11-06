@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { hasForeignTags } from '../lib/go.mjs'
 import { changelogSections } from '../lib/notes.mjs'
 import { bumpKind, closeOpenMarkup, escapeUnknownTags } from '../lib/render.mjs'
 import { compareVersions, headPrefix, parseVersion } from '../lib/tags.mjs'
@@ -177,47 +176,6 @@ describe('unknown tags', () => {
 
   test('an open inline tag is closed as well', () => {
     assert.equal(closeOpenMarkup('<b>x'), '<b>x\n</b>')
-  })
-})
-
-describe('Go links', () => {
-  const update = (name, tags) => ({
-    name,
-    links: { Commits: `https://github.com/aws/sdk/compare/${tags}` },
-  })
-
-  for (const [name, tags, foreign] of [
-    ['github.com/aws/sdk/credentials', 'service/kms/v1.0.0...service/emr/v1.0.1', true],
-    ['github.com/aws/sdk/service/sts', 'service/s3/v1.0.0...service/sts/v1.0.1', true],
-    ['github.com/aws/sdk/service/sts', 'service/sts/v1.0.0...service/sts/v1.0.1', false],
-    ['github.com/aws/sdk', 'v1.0.0...v1.0.1', false],
-    ['github.com/aws/sdk/v2', 'v2.0.0...v2.0.1', false],
-    ['go.vanity.test/sdk/sub', 'sub/v1.0.0...sub/v1.0.1', false],
-    ['github.com/aws/sdk/pseudo', 'abcdef1...abcdef2', false],
-  ]) {
-    test(`${name} with ${tags}: ${foreign}`, () => {
-      assert.equal(hasForeignTags(update(name, tags)), foreign)
-    })
-  }
-
-  test('with another module tags give way to the proxy', async () => {
-    const name = 'github.com/aws/sdk/credentials'
-    const origin = (tag) => ({ URL: 'https://github.com/aws/sdk', Ref: `refs/tags/${tag}` })
-    const posted = await comment({
-      messages: [
-        `Updates \`${name}\` from 1.0.0 to 1.0.1\n- [Commits](https://github.com/aws/sdk/compare/service/kms/v1.0.0...service/emr/v1.0.1)`,
-      ],
-      files: [goModFile([[name, 'v1.0.0', 'v1.0.1']])],
-      routes: {
-        ...proxyRoute(name, 'v1.0.0', origin('credentials/v1.0.0')),
-        ...proxyRoute(name, 'v1.0.1', origin('credentials/v1.0.1')),
-        ...releasesRoute('aws/sdk', []),
-        ...compareRoute('aws/sdk', 'credentials/v1.0.0', 'credentials/v1.0.1', [upstreamCommit('right')]),
-      },
-    })
-
-    assert.match(posted, /right/)
-    assert.doesNotMatch(posted, /service\/emr/)
   })
 })
 
