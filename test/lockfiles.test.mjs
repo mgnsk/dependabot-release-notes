@@ -617,10 +617,25 @@ describe('the spelling of a Python name', () => {
   test('does not hide that an announced update is direct', () => {
     const announced = [{ name: 'Typing_Extensions', from: '1.0', to: '2.0', links: {} }]
     const listed = applyLockfileChanges(announced, [
-      { name: 'typing-extensions', from: '1.0', to: '2.0', links: {}, indirect: false },
+      { name: 'typing-extensions', from: '1.0', to: '2.0', links: {}, indirect: false, python: true },
     ])
 
     assert.deepEqual(listed, [])
     assert.equal(announced[0].indirect, false)
+  })
+
+  test('is read from the Python lockfiles', () => {
+    const lock = '[[package]]\nname = "Typing_Extensions"\nversion = "1.0"\n'
+    assert.equal(diffLockfile(parseUvLock(lock), parseUvLock(lock.replace('1.0', '2.0')))[0].python, true)
+  })
+
+  test('is not folded for npm, where the two spellings are two packages', () => {
+    const announced = [{ name: 'lodash.merge', from: '4.6.1', to: '4.6.2', links: {} }]
+    const listed = applyLockfileChanges(announced, [
+      { name: 'lodash-merge', from: '1.0.0', to: '4.6.2', links: {}, indirect: true },
+    ])
+
+    assert.deepEqual(listed.map(({ name }) => name), ['lodash-merge'])
+    assert.equal(announced[0].indirect, undefined)
   })
 })
