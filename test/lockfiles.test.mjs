@@ -177,21 +177,24 @@ describe('what the lockfiles add', () => {
 
   test('settles whether an announced update is direct, also across directories', () => {
     const announced = [update('a', '1.0', '2.0'), update('b', '0.9', '2.0')]
-    const listed = applyLockfileChanges(announced, [update('a', '1.0', '2.0', true), update('b', '1.0', '2.0', false)])
+    const { updates, listed } = applyLockfileChanges(announced, [
+      update('a', '1.0', '2.0', true),
+      update('b', '1.0', '2.0', false),
+    ])
 
-    assert.deepEqual(announced.map(({ indirect }) => indirect), [true, false])
+    assert.deepEqual(updates.map(({ indirect }) => indirect), [true, false])
     assert.deepEqual(listed, [])
+    assert.deepEqual(announced.map(({ indirect }) => indirect), [undefined, undefined])
   })
 
   test('adds a direct update and lists the rest', () => {
-    const announced = []
-    const listed = applyLockfileChanges(announced, [
+    const { updates, listed } = applyLockfileChanges([], [
       update('direct', '1.0', '2.0', false),
       update('deep', '1.0', '2.0', true),
       update('unknown', '1.0', '2.0', undefined),
     ])
 
-    assert.deepEqual(announced.map(({ name }) => name), ['direct'])
+    assert.deepEqual(updates.map(({ name }) => name), ['direct'])
     assert.deepEqual(listed.map(({ name }) => name), ['deep', 'unknown'])
   })
 })
@@ -679,12 +682,12 @@ dev = [
 describe('the spelling of a Python name', () => {
   test('does not hide that an announced update is direct', () => {
     const announced = [{ name: 'Typing_Extensions', from: '1.0', to: '2.0', links: {} }]
-    const listed = applyLockfileChanges(announced, [
+    const { updates, listed } = applyLockfileChanges(announced, [
       { name: 'typing-extensions', from: '1.0', to: '2.0', links: {}, indirect: false, python: true },
     ])
 
     assert.deepEqual(listed, [])
-    assert.equal(announced[0].indirect, false)
+    assert.equal(updates[0].indirect, false)
   })
 
   test('is read from the Python lockfiles', () => {
@@ -694,11 +697,11 @@ describe('the spelling of a Python name', () => {
 
   test('is not folded for npm, where the two spellings are two packages', () => {
     const announced = [{ name: 'lodash.merge', from: '4.6.1', to: '4.6.2', links: {} }]
-    const listed = applyLockfileChanges(announced, [
+    const { updates, listed } = applyLockfileChanges(announced, [
       { name: 'lodash-merge', from: '1.0.0', to: '4.6.2', links: {}, indirect: true },
     ])
 
     assert.deepEqual(listed.map(({ name }) => name), ['lodash-merge'])
-    assert.equal(announced[0].indirect, undefined)
+    assert.equal(updates[0].indirect, undefined)
   })
 })

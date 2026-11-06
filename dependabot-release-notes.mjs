@@ -29,26 +29,19 @@
 
 import { randomUUID } from 'node:crypto'
 
+import { configError, readConfig } from './lib/config.mjs'
+import { createForges } from './lib/forges.mjs'
 import { completeGoLinks, mergeRequirements } from './lib/go.mjs'
-import { api, listAll, rateLimited, repository, token, unavailable, warn } from './lib/http.mjs'
+import { createClient, warn } from './lib/http.mjs'
 import { applyLockfileChanges, readLockfileChanges } from './lib/lockfiles.mjs'
-import { collectEntries } from './lib/notes.mjs'
+import { createNotes } from './lib/notes.mjs'
 import { MARKER, hasNotes, intoComments, renderDependency, renderOverview } from './lib/render.mjs'
 import { parseUpdates } from './lib/updates.mjs'
 
-const pullRequest = process.env['INPUT_PULL-REQUEST'] || process.env.PR_NUMBER
-
-const commentAuthor =
-  process.env.INPUT_AUTHOR || process.env.COMMENT_AUTHOR || 'github-actions[bot]'
-
-const anyAuthor = (process.env['INPUT_ANY-AUTHOR'] || process.env.ANY_AUTHOR) === 'true'
-
-const onlyWhenTruncated =
-  (process.env['INPUT_ONLY-WHEN-TRUNCATED'] || process.env.ONLY_WHEN_TRUNCATED) === 'true'
-
-const dryRun = process.argv.includes('--dry-run')
-
 const DEPENDABOT = 'dependabot[bot]'
+
+// What Dependabot ends a description with when it did not fit.
+const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
 
 // Anyone can write Dependabot's address into a commit, which GitHub then lists as
 // Dependabot's. Only GitHub can sign a commit as itself, which it does for Dependabot's.
@@ -60,22 +53,10 @@ function isDependabots(commit) {
   )
 }
 
-// What Dependabot ends a description with when it did not fit.
-const TRUNCATED_DESCRIPTION = '_Description has been truncated_'
-
-async function previousComments() {
-  const comments = await listAll(`/repos/${repository}/issues/${pullRequest}/comments`)
-
-  // Anyone can write the marker into a comment, and those are not ours to edit.
-  return comments.filter(
-    (comment) => comment.user?.login === commentAuthor && comment.body?.startsWith(MARKER),
-  )
-}
-
 // The action runs with a write token, and a pull request's commit messages and
 // description decide what it asks for and quotes, so they have to be Dependabot's.
 // A commit pushed on top of Dependabot's has no say, unless any-author is set.
-async function readPullRequest() {
+async function readPullRequest({ api }, { repository, pullRequest, anyAuthor }) {
   const path = `/repos/${repository}/pulls/${pullRequest}`
   const pull = await api(path)
   if (!pull) {
@@ -94,8 +75,8 @@ async function readPullRequest() {
 
 // On a runner a line of output that reads ::name:: is a workflow command, and the
 // notes are someone else's words. Commands stay off until a token they cannot guess.
-function printQuoted(text) {
-  if (process.env.GITHUB_ACTIONS !== 'true') {
+function printQuoted(text, onRunner) {
+  if (!onRunner) {
     console.log(`\n${text}`)
 
     return
@@ -110,19 +91,23 @@ function printQuoted(text) {
 // timeline and the replies and reactions they collected. A comment whose notes
 // are unchanged is left alone, and only a part the notes no longer need goes,
 // which is all of them once a push leaves nothing to report.
-async function publish(comments) {
+async function publish(client, config, comments) {
+  const { repository, pullRequest, author, dryRun, onRunner } = config
   if (dryRun) {
     if (comments.length > 0) {
-      printQuoted(comments.join('\n\n========================================\n\n'))
+      printQuoted(comments.join('\n\n========================================\n\n'), onRunner)
     }
 
     return
   }
 
-  const previous = await previousComments()
+  // Anyone can write the marker into a comment, and those are not ours to edit.
+  const previous = (await client.listAll(`/repos/${repository}/issues/${pullRequest}/comments`)).filter(
+    (comment) => comment.user?.login === author && comment.body?.startsWith(MARKER),
+  )
 
   // Notes that an outage left out are no reason to take back the ones already up.
-  if (unavailable && previous.length > 0) {
+  if (client.unavailable && previous.length > 0) {
     console.error('Keeping the comments already posted.')
 
     return
@@ -132,12 +117,12 @@ async function publish(comments) {
     const comment = previous[index]
 
     if (!comment) {
-      await api(`/repos/${repository}/issues/${pullRequest}/comments`, {
+      await client.api(`/repos/${repository}/issues/${pullRequest}/comments`, {
         method: 'POST',
         body: JSON.stringify({ body }),
       })
     } else if (comment.body !== body) {
-      await api(`/repos/${repository}/issues/comments/${comment.id}`, {
+      await client.api(`/repos/${repository}/issues/comments/${comment.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ body }),
       })
@@ -145,7 +130,7 @@ async function publish(comments) {
   }
 
   for (const comment of previous.slice(comments.length)) {
-    await api(`/repos/${repository}/issues/comments/${comment.id}`, { method: 'DELETE' })
+    await client.api(`/repos/${repository}/issues/comments/${comment.id}`, { method: 'DELETE' })
   }
 }
 
@@ -169,38 +154,43 @@ function report(updates, listed, files, comments) {
   }
 }
 
+// Every update the pull request makes, from its commits, its description and its
+// diff, and the packages only its lockfiles name.
+async function readUpdates(client, config, pull) {
+  const { repository, pullRequest, anyAuthor } = config
+  const commits = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
+  const trusted = commits.filter((commit) => anyAuthor || isDependabots(commit))
+  const files = await client.listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
+
+  const announced = parseUpdates(trusted.map((commit) => commit.commit.message).join('\n'), pull.body ?? '')
+  const lockfileChanges = await readLockfileChanges(client, repository, files, trusted, pull.base?.sha)
+  const { updates: withLockfiles, listed } = applyLockfileChanges(announced, lockfileChanges)
+  const { goUpdates, others } = mergeRequirements(files, withLockfiles)
+  const updates = [...(await completeGoLinks(client, goUpdates)), ...others]
+
+  return { updates, listed, files }
+}
+
 async function main() {
-  if (!token || !repository || !pullRequest) {
-    console.error('GITHUB_TOKEN, GITHUB_REPOSITORY and PR_NUMBER are required')
+  const config = readConfig()
+  const error = configError(config)
+  if (error) {
+    console.error(error)
     process.exit(1)
   }
 
-  // Both go into the path of every request, the writes included.
-  if (!/^[1-9]\d*$/.test(pullRequest) || !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
-    console.error(`Not a pull request number and a repository: ${pullRequest}, ${repository}`)
-    process.exit(1)
-  }
+  const client = createClient(config)
+  const pull = await readPullRequest(client, config)
 
-  const pull = await readPullRequest()
-
-  if (onlyWhenTruncated && !pull.body?.includes(TRUNCATED_DESCRIPTION)) {
+  if (config.onlyWhenTruncated && !pull.body?.includes(TRUNCATED_DESCRIPTION)) {
     console.log('The description holds all of its notes, nothing to post.')
-    await publish([])
+    await publish(client, config, [])
 
     return
   }
 
-  const commits = await listAll(`/repos/${repository}/pulls/${pullRequest}/commits`)
-  const trusted = commits.filter((commit) => anyAuthor || isDependabots(commit))
-  const announced = parseUpdates(
-    trusted.map((commit) => commit.commit.message).join('\n'),
-    pull.body ?? '',
-  )
-  const files = await listAll(`/repos/${repository}/pulls/${pullRequest}/files`)
-  const listed = applyLockfileChanges(announced, await readLockfileChanges(files, trusted, pull.base?.sha))
-  const { updates, goUpdates } = mergeRequirements(files, announced)
-  await completeGoLinks(goUpdates)
-
+  const { updates, listed, files } = await readUpdates(client, config, pull)
+  const { collectEntries } = createNotes({ client, forges: createForges(client) })
   const entries = await collectEntries(
     updates.toSorted((left, right) => Number(Boolean(left.indirect)) - Number(Boolean(right.indirect))),
   )
@@ -215,16 +205,16 @@ async function main() {
 
   report(updates, listed, files, comments)
 
-  if (rateLimited) {
+  if (client.rateLimited) {
     console.error('Rate limited: some notes are missing. Run the action again later.')
-  } else if (unavailable) {
+  } else if (client.unavailable) {
     console.error('Some notes could not be read. Run the action again later.')
   }
-  if (unavailable) {
+  if (client.unavailable) {
     process.exitCode = 1
   }
 
-  await publish(comments)
+  await publish(client, config, comments)
 }
 
 await main()
