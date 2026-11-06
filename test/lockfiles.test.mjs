@@ -56,6 +56,17 @@ describe('package-lock.json', () => {
     assert.deepEqual([...versions.keys()], ['real'])
   })
 
+  test('asks for an aliased package under its own name', () => {
+    const { direct } = parsePackageLock(
+      packageLock({
+        '': { dependencies: { x: 'npm:real@^1.0.0', y: 'npm:@scope/other@2', z: '^3' } },
+        'node_modules/x': { name: 'real', version: '1.0.0' },
+      }),
+    )
+
+    assert.deepEqual([...direct], ['real', '@scope/other', 'z'])
+  })
+
   test('from before npm 7 nests its packages and names no direct ones', () => {
     const { versions, direct } = parsePackageLock(
       JSON.stringify({ dependencies: { a: { version: '1.0.0', dependencies: { b: { version: '2.0.0' } } } } }),
