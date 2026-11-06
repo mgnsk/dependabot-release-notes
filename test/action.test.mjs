@@ -1034,6 +1034,10 @@ describe('a dependency that fails', () => {
     ['a 429', failing(429)],
     ['a 403 with no requests left', failing(403, { 'x-ratelimit-remaining': '0' })],
     ['a 403 asking to retry', failing(403, { 'retry-after': '60' })],
+    [
+      'a 403 that only its message calls a secondary rate limit',
+      { status: 403, body: { message: 'You have exceeded a secondary rate limit.' } },
+    ],
   ]) {
     test(`posts what it has and exits 1 on ${name}`, async () => {
       const run = await runAction({
