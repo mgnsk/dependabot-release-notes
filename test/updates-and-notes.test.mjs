@@ -271,6 +271,31 @@ describe('more releases than the page limit', () => {
   })
 })
 
+describe('ranges that share their notes', () => {
+  test('say that older releases were not read when one of them says so', async () => {
+    const routes = {}
+    for (let number = 1; number <= 10; number++) {
+      routes[`GET https://api.github.com/repos/o/r/releases?per_page=100&page=${number}`] = ok(
+        Array.from({ length: 100 }, (_, index) => release(`v9.${number}.${index}-canary.1`, 'filler')),
+      )
+    }
+    for (const major of [7, 6, 5, 4, 3]) {
+      routes[`GET https://api.github.com/repos/o/r/git/matching-refs/tags/v${major}.`] = ok(
+        major >= 6 ? [{ ref: `refs/tags/v${major}.0.0` }] : [],
+      )
+    }
+    routes['GET https://api.github.com/repos/o/r/releases/tags/v7.0.0'] = ok(release('v7.0.0', 'seven'))
+    routes['GET https://api.github.com/repos/o/r/releases/tags/v6.0.0'] = notFound
+
+    const block = (from) =>
+      `Updates \`r\` from ${from} to 7.0.0\n- [Commits](https://github.com/o/r/compare/v${from}...v7.0.0)`
+    const posted = await comment({ messages: [`${block('6.0.0')}\n\n${block('1.0.0')}`], routes })
+
+    assert.equal(count(posted, '<summary><code>'), 1)
+    assert.match(posted, /Older releases in this range were not read/)
+  })
+})
+
 describe('tag styles', () => {
   for (const [title, name, tags] of [
     ['a package and a dash', 'foo', ['foo-v1.2.2', 'foo-v1.2.3', 'foo-v1.3.0']],
