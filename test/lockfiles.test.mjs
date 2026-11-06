@@ -359,6 +359,38 @@ describe('a pull request with a lockfile', () => {
 
 const names = (reading) => [...reading.versions].map(([name, versions]) => `${name} ${[...versions].join(' ')}`)
 
+describe('pnpm-lock.yaml from before version 6', () => {
+  const lock = `lockfileVersion: 5.4
+
+specifiers:
+  a: ^1.0.0
+
+dependencies:
+  a: 1.0.0
+
+devDependencies:
+  '@s/b': 2.0.0_c@3.0.0
+
+packages:
+
+  /a/1.0.0:
+    resolution: {integrity: sha512-a}
+
+  /@s/b/2.0.0_c@3.0.0:
+    resolution: {integrity: sha512-b}
+
+  /c/3.0.0:
+    resolution: {integrity: sha512-c}
+`
+
+  test('gives the versions and the names asked for', () => {
+    const { versions, direct } = parsePnpmLock(lock)
+
+    assert.deepEqual(names({ versions }), ['a 1.0.0', '@s/b 2.0.0', 'c 3.0.0'])
+    assert.deepEqual([...direct], ['a', '@s/b'])
+  })
+})
+
 describe('pnpm-lock.yaml', () => {
   const lock = `lockfileVersion: '9.0'
 
